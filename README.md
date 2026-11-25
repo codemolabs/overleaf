@@ -45,14 +45,17 @@ A self-hosted enterprise distribution of Overleaf Community Edition forked from 
 
 <div align="center">
 
-<img src="doc/screenshots/dashboard.png" alt="Project Dashboard with Custom Enterprise Branding and Sync Folder Badges" width="90%"/>
-<p><sub>Project Dashboard with custom organization branding, Organize Tags filters, and mapped host sync folder badges</sub></p>
+<img src="doc/screenshots/login.png" alt="Sign-In Page with Clean Vector COSL Edition Branding" width="90%"/>
+<p><sub>Sign-In experience featuring the clean vector COSL Edition logo and uncluttered navigation bar</sub></p>
+
+<img src="doc/screenshots/dashboard.png" alt="Project Dashboard with Custom Enterprise Branding, Organize Tags, and Sync Folder Badges" width="90%"/>
+<p><sub>Project Dashboard with the logo-only header, Organize Tags filters, and mapped host sync folder badges</sub></p>
 
 <img src="doc/screenshots/ide-editor.png" alt="LaTeX IDE compiling two-column manuscript with Booktabs and high-res figure" width="90%"/>
 <p><sub>Live IDE compiling synchronized host sources with Package Hub dependencies and automatic 15s OT persistence</sub></p>
 
-<img src="doc/screenshots/cloud-zip-modal.png" alt="Cloud ZIP Optimizer reducing an 11.84 MB local project down to 171.6 KB" width="90%"/>
-<p><sub>Cloud ZIP (&lt; 30 MB) optimizer pruning draft PDFs/scripts and compressing figures for cloud upload</sub></p>
+<img src="doc/screenshots/cloud-zip-modal.png" alt="Cloud ZIP Optimizer reducing a 3.60 MB local project down to 1.37 MB" width="90%"/>
+<p><sub>Cloud ZIP (&lt; 30 MB) optimizer pruning draft PDFs and unused files while compressing figures for cloud upload</sub></p>
 
 <img src="doc/screenshots/package-hub.png" alt="Self-Hosted LaTeX Package Hub UI" width="90%"/>
 <p><sub>Integrated TeX Package Hub managing TeX Live, CTAN packages, Starter Packs, and custom style uploads</sub></p>
@@ -61,7 +64,10 @@ A self-hosted enterprise distribution of Overleaf Community Edition forked from 
 <p><sub>Host workspace folder browser and per-project destination allocator persisted to MongoDB</sub></p>
 
 <img src="doc/screenshots/admin-console.png" alt="Enterprise System Admin Console" width="90%"/>
-<p><sub>Enterprise Admin Console monitoring core services, Package Hub, Local Folder Sync, sharing policies, and branding</sub></p>
+<p><sub>Enterprise Admin Console monitoring core services, Package Hub, Local Folder Sync, and user access</sub></p>
+
+<img src="doc/screenshots/admin-branding.png" alt="Enterprise Admin Organization Branding and Maintenance Settings" width="90%"/>
+<p><sub>Network-wide Organization Logo controls with live Light/Dark header previews, maintenance toggles, and announcements</sub></p>
 
 </div>
 
