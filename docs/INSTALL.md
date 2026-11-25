@@ -33,7 +33,7 @@ Useful installer flags:
 | `--port` | `80` | Host HTTP port mapped to container port `80` |
 | `--listen` | `127.0.0.1` | Host bind IP (`0.0.0.0` exposes to local lab/office LAN) |
 | `--projects-dir` | `./data/projects` | Host directory bind-mounted to `/projects` inside the container |
-| `--app-name` | `Overleaf: COSL Edition for Enterprises` | Initial UI title & navbar brand name |
+| `--app-name` | `Overleaf: COSL Edition for Enterprises` | Initial page title & system branding name |
 | `--image` | `codemolabs/overleaf:latest` | Prebuilt image tag or custom local build tag |
 | `--no-start` | `false` | Write `.env` and initialize directories without starting containers |
 

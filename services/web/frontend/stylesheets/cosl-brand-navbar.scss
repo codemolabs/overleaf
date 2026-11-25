@@ -1,0 +1,31 @@
+// Proportional sizing for COSL Edition transparent SVG brand across application pages (excluding IDE)
+.navbar-default.navbar-main {
+  --navbar-brand-width: 158px;
+
+  .navbar-header .navbar-brand {
+    align-items: center;
+
+    .navbar-logo {
+      width: var(--navbar-brand-width);
+      height: 52px;
+      align-self: center;
+      background-size: contain;
+      background-position: left center;
+      background-repeat: no-repeat;
+    }
+
+    .navbar-title {
+      display: none !important;
+    }
+  }
+}
+
+.project-ds-nav-page .navbar-default .navbar-header .navbar-logo {
+  top: 0;
+}
+
+.ds-nav-page-switcher-logo img {
+  height: 42px;
+  width: auto;
+  max-width: 158px;
+}

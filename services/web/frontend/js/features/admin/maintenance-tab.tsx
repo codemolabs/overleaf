@@ -322,7 +322,7 @@ export default function MaintenanceTab({
 
         <div className="ol-admin-panel-body">
           <p className="ol-admin-muted mb-3">
-            Replace the default Overleaf logo across the workspace for all users
+            Replace the default workspace logo across the instance for all users
             on your network.
           </p>
 
@@ -421,7 +421,7 @@ export default function MaintenanceTab({
                 disabled={brandingBusy || !hasAnyCustomBranding}
                 onClick={handleResetBranding}
               >
-                Reset to Overleaf logo
+                Reset to default logo
               </OLButton>
             </div>
           </OLForm>

@@ -1925,18 +1925,6 @@ import WorkspaceBrandingService from '../Features/ServerAdmin/WorkspaceBrandingS
     'workspaceBranding && workspaceBranding.logoUrl'
   )
 
-  replaceIfPresent(
-    'app/views/layout/navbar-marketing.pug',
-    `\t\t\t- var legacyTitles = ['Our Overleaf Instance', 'Overleaf Community Edition', 'Overleaf (Community Edition)']
-\t\t\t- var customLogo = settings.nav.custom_logo_light || settings.nav.custom_logo
-\t\t\t- var effectiveTitle = nav.title && !legacyTitles.includes(String(nav.title).trim()) ? nav.title : null
-\t\t\t- var brandLabel = settings.appName && !legacyTitles.includes(String(settings.appName).trim()) ? settings.appName : 'Overleaf'`,
-    `\t\t\t- var legacyTitles = ['Our Overleaf Instance', 'Overleaf Community Edition', 'Overleaf (Community Edition)']
-\t\t\t- var customLogo = (workspaceBranding && workspaceBranding.logoUrl) || settings.nav.custom_logo_light || settings.nav.custom_logo
-\t\t\t- var effectiveTitle = nav.title && !legacyTitles.includes(String(nav.title).trim()) ? nav.title : null
-\t\t\t- var brandLabel = (workspaceBranding && workspaceBranding.organizationName) || (settings.appName && !legacyTitles.includes(String(settings.appName).trim()) ? settings.appName : 'Overleaf')`
-  )
-
   replaceExact(
     'app/views/layout/navbar-marketing.pug',
     `\t\t\t- var customLogo = settings.nav.custom_logo_light || settings.nav.custom_logo
@@ -1949,15 +1937,20 @@ import WorkspaceBrandingService from '../Features/ServerAdmin/WorkspaceBrandingS
 \t\t\t\t\t.navbar-logo`,
     `\t\t\t- var legacyTitles = ['Our Overleaf Instance', 'Overleaf Community Edition', 'Overleaf (Community Edition)']
 \t\t\t- var customLogo = (workspaceBranding && workspaceBranding.logoUrl) || settings.nav.custom_logo_light || settings.nav.custom_logo
-\t\t\t- var effectiveTitle = nav.title && !legacyTitles.includes(String(nav.title).trim()) ? nav.title : null
 \t\t\t- var brandLabel = (workspaceBranding && workspaceBranding.organizationName) || (settings.appName && !legacyTitles.includes(String(settings.appName).trim()) ? settings.appName : 'Overleaf')
 \t\t\t- var defaultLogoUrl = customLogo || buildImgPath(isWebsiteRedesign ? '/ol-brand/overleaf-green.svg' : '/ol-brand/overleaf-white.svg')
 \t\t\ta.navbar-brand(href='/' aria-label=brandLabel)
-\t\t\t\tif customLogo || !effectiveTitle
+\t\t\t\t.navbar-logo(style=\`background-image:url("\${defaultLogoUrl}")\`)`,
+    'var legacyTitles ='
+  )
+
+  replaceIfPresent(
+    'app/views/layout/navbar-marketing.pug',
+    `\t\t\t\tif customLogo || !effectiveTitle
 \t\t\t\t\t.navbar-logo(style=\`background-image:url("\${defaultLogoUrl}")\`)
 \t\t\t\tif effectiveTitle
 \t\t\t\t\t.navbar-title #{effectiveTitle}`,
-    'var legacyTitles ='
+    `\t\t\t\t.navbar-logo(style=\`background-image:url("\${defaultLogoUrl}")\`)`
   )
 
   // 11. Cloud ZIP (< 30 MB) export backend
@@ -2970,9 +2963,15 @@ import overleafLogoDark from '@/shared/svgs/overleaf-white.svg'`,
         <img
           src={logoSrc}
           alt={brandLabel}
-          height="38"
-          width="130"
-          style={{ objectFit: 'contain', objectPosition: 'left center' }}
+          height="42"
+          width="118"
+          style={{
+            height: '42px',
+            width: 'auto',
+            maxWidth: '158px',
+            objectFit: 'contain',
+            objectPosition: 'left center',
+          }}
         />
       </a>
     </div>
@@ -3015,15 +3014,37 @@ import overleafLogoDark from '@/shared/svgs/overleaf-white.svg'`,
         <img
           src={logoSrc}
           alt={brandLabel}
-          height="38"
-          width="130"
-          style={{ objectFit: 'contain', objectPosition: 'left center' }}
+          height="42"
+          width="118"
+          style={{
+            height: '42px',
+            width: 'auto',
+            maxWidth: '158px',
+            objectFit: 'contain',
+            objectPosition: 'left center',
+          }}
         />
       </a>
     </div>
   )
 }`,
     'navbarMeta?.customLogo'
+  )
+
+  replaceIfPresent(
+    'frontend/js/shared/components/sidebar/ds-nav-overleaf-logo.tsx',
+    `          height="38"
+          width="130"
+          style={{ objectFit: 'contain', objectPosition: 'left center' }}`,
+    `          height="42"
+          width="118"
+          style={{
+            height: '42px',
+            width: 'auto',
+            maxWidth: '158px',
+            objectFit: 'contain',
+            objectPosition: 'left center',
+          }}`
   )
 
   replaceExact(
@@ -3266,7 +3287,7 @@ if (getMeta('ol-adminUserExists')) {
   copyStagedFile('frontend/js/features/admin/admin-console-root.tsx')
   copyStagedFile('frontend/js/pages/admin.tsx')
 
-  // 14. Clean native Overleaf SVG navbar brand logo instead of placeholder nav.title
+  // 14. Clean COSL Edition SVG navbar brand logo (logo only, no odd navbar-title text)
   replaceExact(
     'frontend/js/shared/components/navbar/header-logo-or-title.tsx',
     `import type { DefaultNavbarMetadata } from '@/shared/components/types/default-navbar-metadata'
@@ -3328,17 +3349,16 @@ function isDarkNavbarContext() {
 export default function HeaderLogoOrTitle({
   overleafLogo,
   customLogo,
-  title,
 }: Pick<DefaultNavbarMetadata, 'customLogo' | 'title'> & {
   overleafLogo?: string
 }) {
   const appName = getMeta('ol-ExposedSettings')?.appName
-  const effectiveTitle =
-    title && !LEGACY_PLACEHOLDER_TITLES.has(title.trim()) ? title : undefined
+  const organizationName = getMeta('ol-navbar')?.organizationName
   const brandLabel =
-    appName && !LEGACY_PLACEHOLDER_TITLES.has(appName.trim())
+    organizationName ||
+    (appName && !LEGACY_PLACEHOLDER_TITLES.has(appName.trim())
       ? appName
-      : 'Overleaf'
+      : 'Overleaf')
   const fallbackLogo = isDarkNavbarContext()
     ? overleafWhiteLogo
     : overleafGreenLogo
@@ -3346,7 +3366,21 @@ export default function HeaderLogoOrTitle({
 
   return (
     <a href="/" aria-label={brandLabel} className="navbar-brand">
-      {(customLogo || !effectiveTitle) && (
+      <div
+        className="navbar-logo"
+        style={
+          logoUrl ? { backgroundImage: \`url("\${logoUrl}")\` } : undefined
+        }
+      />
+    </a>
+  )
+}`,
+    'LEGACY_PLACEHOLDER_TITLES'
+  )
+
+  replaceIfPresent(
+    'frontend/js/shared/components/navbar/header-logo-or-title.tsx',
+    `      {(customLogo || !effectiveTitle) && (
         <div
           className="navbar-logo"
           style={
@@ -3358,11 +3392,13 @@ export default function HeaderLogoOrTitle({
         <div className="navbar-title">
           <span>{effectiveTitle}</span>
         </div>
-      )}
-    </a>
-  )
-}`,
-    'LEGACY_PLACEHOLDER_TITLES'
+      )}`,
+    `      <div
+        className="navbar-logo"
+        style={
+          logoUrl ? { backgroundImage: \`url("\${logoUrl}")\` } : undefined
+        }
+      />`
   )
 
   // 15. Enterprise Project Access & User-to-User Sharing UI
@@ -3483,20 +3519,6 @@ import ProjectSharingBadge from '../sharing/project-sharing-badge'`,
     'organizationName?: string'
   )
 
-  replaceIfPresent(
-    'frontend/js/shared/components/navbar/header-logo-or-title.tsx',
-    `  const brandLabel =
-    appName && !LEGACY_PLACEHOLDER_TITLES.has(appName.trim())
-      ? appName
-      : 'Overleaf'`,
-    `  const organizationName = getMeta('ol-navbar')?.organizationName
-  const brandLabel =
-    organizationName ||
-    (appName && !LEGACY_PLACEHOLDER_TITLES.has(appName.trim())
-      ? appName
-      : 'Overleaf')`
-  )
-
   replaceExact(
     'frontend/js/features/project-list/components/table/project-tools/buttons/tags-dropdown.tsx',
     `      <OLDropdown align="end" autoClose="outside">
@@ -3555,6 +3577,83 @@ import ProjectSharingBadge from '../sharing/project-sharing-badge'`,
   copyStagedFile('frontend/js/features/ide-react/components/toolbar/download-project.tsx')
   copyStagedFile('frontend/js/features/ide-react/components/toolbar/project-title.tsx')
   copyStagedFile('frontend/js/features/project-list/components/table/cells/action-buttons/cloud-download-project-button.tsx')
+
+  // 19. COSL Edition SVG brand logos & responsive header/logo sizing (logo only on top bar)
+  copyStagedFile('frontend/stylesheets/cosl-brand-navbar.scss')
+  copyStagedFile('frontend/js/features/package-hub/components/package-hub.scss')
+  for (const svgName of [
+    'overleaf-green.svg',
+    'overleaf-white.svg',
+    'overleaf.svg',
+    'overleaf-black.svg',
+  ]) {
+    copyStagedFile(`frontend/js/shared/svgs/${svgName}`)
+    copyStagedFile(`public/img/ol-brand/${svgName}`)
+  }
+
+  replaceExact(
+    'frontend/stylesheets/components/nav.scss',
+    `  --navbar-brand-width: 130px;`,
+    `  --navbar-brand-width: 158px;`,
+    '--navbar-brand-width: 158px'
+  )
+
+  replaceExact(
+    'frontend/stylesheets/components/navbar.scss',
+    `    .navbar-logo {
+      flex: 0 0 auto;
+      width: var(--navbar-brand-width);
+      height: $header-height;
+      padding: 0;`,
+    `    .navbar-logo {
+      flex: 0 0 auto;
+      width: var(--navbar-brand-width);
+      height: calc($header-height - 14px);
+      align-self: center;
+      padding: 0;`,
+    'calc($header-height - 14px)'
+  )
+
+  replaceExact(
+    'frontend/stylesheets/pages/project-list-ds-nav.scss',
+    `    .navbar-header .navbar-logo {
+      @include media-breakpoint-up(md) {
+        position: relative;
+        top: calc(var(--spacing-05) * 2);
+        left: var(--spacing-05);
+      }
+    }`,
+    `    .navbar-header .navbar-logo {
+      @include media-breakpoint-up(md) {
+        position: relative;
+        top: 0;
+        left: var(--spacing-05);
+      }
+    }`,
+    'top: 0;'
+  )
+
+  replaceExact(
+    'frontend/stylesheets/pages/project-list-ds-nav.scss',
+    `      .ds-nav-page-switcher-logo {
+        padding: 0 var(--spacing-08) var(--spacing-04);
+
+        img {
+          width: 130px;
+          height: auto;
+        }
+      }`,
+    `      .ds-nav-page-switcher-logo {
+        padding: 0 var(--spacing-08) var(--spacing-04);
+
+        img {
+          width: auto;
+          max-width: 158px;
+          height: 42px;
+        }
+      }`,
+    'max-width: 158px;'
+  )
 }
 
 if (mode === 'backend' || mode === 'all') {
