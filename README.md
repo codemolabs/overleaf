@@ -1,6 +1,6 @@
 <div align="center">
 
-<img src="doc/cosl-edition-document-logo.png" alt="Overleaf: COSL Edition for Enterprises Logo" width="360" />
+<img src="doc/cosl-edition-document-logo.png" alt="Overleaf: COSL Edition for Enterprises Logo" width="260" />
 
 # Overleaf: COSL Edition for Enterprises
 
