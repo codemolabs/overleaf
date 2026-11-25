@@ -151,6 +151,25 @@ function writeFileAtomic(destPath, contentOrSourcePath, isCopy = false) {
   }
 }
 
+function sha1File(filePath) {
+  return crypto.createHash('sha1').update(fs.readFileSync(filePath)).digest('hex')
+}
+
+function filesHaveIdenticalBytes(srcPath, destPath) {
+  try {
+    const destStat = fs.lstatSync(destPath)
+    if (!destStat.isFile() || destStat.isSymbolicLink()) return false
+    const srcStat = fs.statSync(srcPath)
+    if (srcStat.size !== destStat.size) return false
+    if (srcStat.size <= 1024 * 1024) {
+      return Buffer.compare(fs.readFileSync(srcPath), fs.readFileSync(destPath)) === 0
+    }
+    return sha1File(srcPath) === sha1File(destPath)
+  } catch {
+    return false
+  }
+}
+
 /**
  * Remove empty ancestor directories strictly inside `stopAtDir` (never removes stopAtDir unless removeStopDirIfEmpty is true).
  */
@@ -438,9 +457,40 @@ async function handleSync(body) {
       }
     }
 
-    // 5. Copy all staged files atomically into targetDir
+    // 5. Copy changed/new staged files atomically into targetDir and capture post-write stats
+    const callerBaselines =
+      body.baselines && typeof body.baselines === 'object' ? body.baselines : {}
+    let writtenFilesCount = 0
+    let skippedUnchangedCount = 0
+    const nextBaselines = {}
+
     for (const item of validatedFiles) {
-      writeFileAtomic(item.destPath, item.srcPath, true)
+      if (filesHaveIdenticalBytes(item.srcPath, item.destPath)) {
+        skippedUnchangedCount++
+      } else {
+        writeFileAtomic(item.destPath, item.srcPath, true)
+        writtenFilesCount++
+      }
+      try {
+        const st = fs.statSync(item.destPath)
+        const callerBase = callerBaselines[item.relPath]
+        nextBaselines[item.relPath] = {
+          hostSha1:
+            callerBase && typeof callerBase.hostSha1 === 'string'
+              ? callerBase.hostSha1
+              : sha1File(item.destPath),
+          overleafHash:
+            callerBase && typeof callerBase.overleafHash === 'string'
+              ? callerBase.overleafHash
+              : null,
+          kind:
+            callerBase && typeof callerBase.kind === 'string'
+              ? callerBase.kind
+              : null,
+          mtimeMs: st.mtimeMs,
+          size: st.size,
+        }
+      } catch {}
     }
 
     // 6. Prune stale files ONLY if they were previously tracked by Overleaf sync manifest
@@ -478,6 +528,7 @@ async function handleSync(body) {
       projectName: String(projectName || ''),
       syncedAt,
       files: validatedFiles.map(f => f.relPath).sort(),
+      baselines: nextBaselines,
     }
     writeFileAtomic(
       path.join(normalizedTarget, SYNC_MANIFEST_FILENAME),
@@ -519,6 +570,8 @@ async function handleSync(body) {
       projectId,
       targetDir: normalizedTarget,
       fileCount: validatedFiles.length,
+      writtenFilesCount,
+      skippedUnchangedCount,
       removedStaleCount,
       cleanedOldDir,
     })
@@ -529,11 +582,90 @@ async function handleSync(body) {
         ok: true,
         targetDir: normalizedTarget,
         syncedFilesCount: validatedFiles.length,
+        writtenFilesCount,
+        skippedUnchangedCount,
         removedStaleCount,
         cleanedOldDir,
         syncedAt,
       },
     }
+  })
+}
+
+async function handleManifestUpdate(body) {
+  const { projectId, projectName, targetDir, files = [], baselines = {} } = body
+  if (!projectId || typeof projectId !== 'string') {
+    return { status: 400, payload: { ok: false, error: 'Missing projectId' } }
+  }
+  const targetCheck = validateHostFolderPath(targetDir, { checkSymlinks: true })
+  if (!targetCheck.ok) {
+    return { status: 400, payload: { ok: false, error: targetCheck.error } }
+  }
+  const normalizedTarget = targetCheck.normalizedPath
+  if (!fs.existsSync(normalizedTarget)) {
+    return { status: 404, payload: { ok: false, error: 'Target folder does not exist' } }
+  }
+
+  return await withLock(`project:${projectId}`, async () => {
+    const existingManifest = readManifest(normalizedTarget)
+    if (
+      existingManifest &&
+      existingManifest.projectId &&
+      String(existingManifest.projectId) !== String(projectId)
+    ) {
+      return {
+        status: 409,
+        payload: {
+          ok: false,
+          error: `Target folder "${normalizedTarget}" is synced with another project`,
+        },
+      }
+    }
+
+    const validRelFiles = []
+    const nextBaselines = {}
+    const seen = new Set()
+    for (const rawRel of Array.isArray(files) ? files : []) {
+      const v = validateRelativeEntityPath(rawRel)
+      if (!v.ok || seen.has(v.relPath)) continue
+      const destPath = path.resolve(normalizedTarget, v.relPath)
+      if (!isPathEqualOrInside(normalizedTarget, destPath)) continue
+      seen.add(v.relPath)
+      validRelFiles.push(v.relPath)
+      const base = baselines && typeof baselines === 'object' ? baselines[v.relPath] : null
+      try {
+        const st = fs.statSync(destPath)
+        if (st.isFile()) {
+          nextBaselines[v.relPath] = {
+            hostSha1:
+              base && typeof base.hostSha1 === 'string'
+                ? base.hostSha1
+                : sha1File(destPath),
+            overleafHash:
+              base && typeof base.overleafHash === 'string' ? base.overleafHash : null,
+            kind: base && typeof base.kind === 'string' ? base.kind : null,
+            mtimeMs: st.mtimeMs,
+            size: st.size,
+          }
+        }
+      } catch {}
+    }
+
+    const syncedAt = new Date().toISOString()
+    const nextManifest = {
+      version: 1,
+      projectId: String(projectId),
+      projectName: String(projectName || existingManifest?.projectName || ''),
+      syncedAt,
+      files: validRelFiles.sort(),
+      baselines: nextBaselines,
+    }
+    writeFileAtomic(
+      path.join(normalizedTarget, SYNC_MANIFEST_FILENAME),
+      JSON.stringify(nextManifest, null, 2) + '\n',
+      false
+    )
+    return { status: 200, payload: { ok: true, syncedAt } }
   })
 }
 
@@ -565,6 +697,10 @@ const server = http.createServer(async (req, res) => {
       }
       if (req.url === '/sync') {
         const result = await handleSync(body)
+        return sendJson(res, result.status, result.payload)
+      }
+      if (req.url === '/manifest') {
+        const result = await handleManifestUpdate(body)
         return sendJson(res, result.status, result.payload)
       }
     }

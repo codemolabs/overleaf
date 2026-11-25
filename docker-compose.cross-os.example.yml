@@ -20,6 +20,8 @@ services:
       LOCAL_SYNC_ALLOWED_ROOT: "/projects"
       LOCAL_SYNC_DEFAULT_BASE_DIR: "/projects/OverleafProjects"
       OVERLEAF_ENABLE_PACKAGE_HUB: "true"
+      MAX_UNFLUSHED_AGE_SECONDS: "15"
+      CONTINUOUS_BACKGROUND_FLUSH: "true"
 
       # Optional: Automatically create the first administrator account on fresh startup
       # when zero admin accounts exist yet (leave commented to use /launchpad UI setup):

@@ -8,6 +8,7 @@ import Settings from '@overleaf/settings'
 import { Project } from '../../models/Project.mjs'
 import { User } from '../../models/User.mjs'
 import DocumentUpdaterHandler from '../DocumentUpdater/DocumentUpdaterHandler.mjs'
+import EditorController from '../Editor/EditorController.mjs'
 import HistoryManager from '../History/HistoryManager.mjs'
 import ProjectEntityHandler from './ProjectEntityHandler.mjs'
 import ProjectGetter from './ProjectGetter.mjs'
@@ -15,6 +16,7 @@ import ProjectHelper from './ProjectHelper.mjs'
 import {
   ALLOWED_ROOT,
   DEFAULT_BASE_DIR,
+  SYNC_MANIFEST_FILENAME,
   doPathsOverlap,
   sanitizeProjectFolderName,
   validateHostFolderPath,
@@ -27,17 +29,324 @@ const STAGE_ROOT = path.resolve(
   process.env.LOCAL_SYNC_STAGE_ROOT || '/tmp/overleaf-local-sync-stage'
 )
 const DEBOUNCE_MS = 1200
+const WATCH_SUPPRESS_MS = 2500
 
 /** @type {Map<string, { timer: NodeJS.Timeout, options: Record<string, any> }>} */
 const pendingSyncs = new Map()
 
+/** @type {Set<string>} Projects currently undergoing ingest from host */
+const activeIngests = new Set()
+
+/** @type {Set<string>} Projects currently exporting to host */
+const activeExports = new Set()
+
+/** @type {Map<string, number>} Suppress self-echo fs.watch bursts until timestamp */
+const suppressWatcherUntil = new Map()
+
+/** @type {Map<string, Promise<any>>} Per-project sync mutex */
+const projectSyncLocks = new Map()
+
+/** @type {Map<string, { watcher: fs.FSWatcher, targetDir: string, projectName: string }>} */
+const activeWatchers = new Map()
+
+async function withProjectSyncLock(key, fn) {
+  const prev = projectSyncLocks.get(key) || Promise.resolve()
+  let release
+  const current = new Promise(resolve => {
+    release = resolve
+  })
+  const chained = prev.then(() => current)
+  projectSyncLocks.set(key, chained)
+  await prev
+  try {
+    return await fn()
+  } finally {
+    release()
+    if (projectSyncLocks.get(key) === chained) {
+      projectSyncLocks.delete(key)
+    }
+  }
+}
+
+function toRelPath(rawPath) {
+  return String(rawPath || '')
+    .replace(/\\/g, '/')
+    .replace(/^\/+/, '')
+}
+
+function buildEntityLookup(entityMap) {
+  const lookup = new Map()
+  for (const [rawKey, value] of Object.entries(entityMap || {})) {
+    const rel = toRelPath(rawKey)
+    if (rel) {
+      lookup.set(rel, value)
+    }
+  }
+  return lookup
+}
+
+function normalizeDocText(text) {
+  return String(text || '').replace(/\r\n|\r/g, '\n')
+}
+
+function sha1Raw(input) {
+  return crypto.createHash('sha1').update(input).digest('hex')
+}
+
+function sha1GitBlob(buf) {
+  const header = Buffer.from(`blob ${buf.length}\0`, 'utf8')
+  return crypto.createHash('sha1').update(header).update(buf).digest('hex')
+}
+
+function sha1FileStream(filePath) {
+  return new Promise((resolve, reject) => {
+    const hash = crypto.createHash('sha1')
+    const stream = fs.createReadStream(filePath)
+    stream.on('data', chunk => hash.update(chunk))
+    stream.on('error', reject)
+    stream.on('end', () => resolve(hash.digest('hex')))
+  })
+}
+
+function readSyncManifest(targetDir) {
+  const manifestPath = path.join(targetDir, SYNC_MANIFEST_FILENAME)
+  try {
+    const st = fs.lstatSync(manifestPath)
+    if (!st.isFile() || st.isSymbolicLink()) return null
+    const parsed = JSON.parse(fs.readFileSync(manifestPath, 'utf8'))
+    if (!parsed || typeof parsed !== 'object') return null
+    const files = new Set(
+      Array.isArray(parsed.files) ? parsed.files.map(toRelPath).filter(Boolean) : []
+    )
+    const baselines =
+      parsed.baselines && typeof parsed.baselines === 'object' ? parsed.baselines : null
+    return { raw: parsed, files, baselines }
+  } catch {
+    return null
+  }
+}
+
+function computeHostFileHashInfo(hostFile) {
+  try {
+    if (hostFile.isDoc) {
+      const rawContent = fs.readFileSync(hostFile.absPath, 'utf8')
+      const normalized = normalizeDocText(rawContent)
+      return {
+        rawContent,
+        hostSha1: sha1Raw(Buffer.from(normalized, 'utf8')),
+        hostGitHash: null,
+      }
+    }
+    const buf = fs.readFileSync(hostFile.absPath)
+    return {
+      rawContent: null,
+      hostSha1: sha1Raw(buf),
+      hostGitHash: sha1GitBlob(buf),
+    }
+  } catch {
+    return null
+  }
+}
+
+function shouldIngestEntry({
+  presentInOverleaf,
+  sameContent,
+  hasBaseline,
+  hostChanged,
+  ovChanged,
+  inManifest,
+  hostMtimeMs,
+  ovUpdatedMs,
+  lastSyncMs,
+  hostTriggered,
+  preferHost,
+}) {
+  if (!presentInOverleaf) {
+    if (inManifest && hasBaseline && !hostChanged) {
+      return false
+    }
+    return true
+  }
+  if (sameContent) {
+    return false
+  }
+  if (hasBaseline) {
+    if (!hostChanged) {
+      return false
+    }
+    if (!ovChanged || preferHost) {
+      return true
+    }
+    if (!hostTriggered && hostMtimeMs + 1000 < ovUpdatedMs) {
+      return false
+    }
+    return hostMtimeMs >= ovUpdatedMs
+  }
+  if (preferHost) {
+    return true
+  }
+  return (
+    hostMtimeMs > lastSyncMs + 1000 &&
+    (Boolean(hostTriggered) || ovUpdatedMs <= lastSyncMs + 1000)
+  )
+}
+
+/**
+ * Text file extensions that should be treated as Overleaf Docs (UTF-8 lines)
+ */
+const TEXT_EXTS = new Set([
+  '.tex',
+  '.bib',
+  '.cls',
+  '.sty',
+  '.bst',
+  '.txt',
+  '.md',
+  '.markdown',
+  '.json',
+  '.csv',
+  '.tsv',
+  '.yaml',
+  '.yml',
+  '.xml',
+  '.html',
+  '.css',
+  '.js',
+  '.mjs',
+  '.py',
+  '.sh',
+  '.r',
+  '.lua',
+  '.tikz',
+  '.dtx',
+  '.ins',
+])
+
+/**
+ * Extensions to ignore completely during directory scan
+ */
+const IGNORE_EXTS = new Set([
+  '.aux',
+  '.log',
+  '.out',
+  '.bbl',
+  '.blg',
+  '.synctex',
+  '.synctex.gz',
+  '.toc',
+  '.lof',
+  '.lot',
+  '.fls',
+  '.fdb_latexmk',
+  '.nav',
+  '.snm',
+  '.vrb',
+  '.run.xml',
+  '-blx.bib',
+  '.bak',
+  '.swp',
+  '.swo',
+])
+
+function isDocExtension(filename) {
+  const ext = path.extname(filename).toLowerCase()
+  return TEXT_EXTS.has(ext)
+}
+
+function shouldIgnoreHostFile(relPath, projectName, projectId) {
+  const normalized = relPath.replace(/\\/g, '/')
+  const segments = normalized.split('/')
+  const baseName = segments[segments.length - 1]
+
+  // Ignore hidden files and directories
+  for (const seg of segments) {
+    if (seg.startsWith('.') && seg !== '.') return true
+  }
+
+  // Ignore temp and backup files
+  if (baseName.startsWith('~') || baseName.endsWith('.tmp')) return true
+  if (baseName.includes('.overleaf-tmp-')) return true
+
+  // Ignore sync manifest
+  if (baseName === SYNC_MANIFEST_FILENAME) return true
+
+  // Ignore version control directories
+  if (segments.some(s => s === '.git' || s === '.svn' || s === '.hg')) {
+    return true
+  }
+
+  // Ignore build artifacts
+  const ext = path.extname(baseName).toLowerCase()
+  if (IGNORE_EXTS.has(ext)) return true
+
+  // Ignore root-level compiled PDF (e.g. output.pdf, main.pdf, <projectName>.pdf)
+  // but preserve any PDF assets inside subdirectories (e.g. figures/*.pdf)
+  if (segments.length === 1 && ext === '.pdf') {
+    const sanitized = sanitizeProjectFolderName(projectName, projectId)
+    const lower = baseName.toLowerCase()
+    if (
+      lower === 'output.pdf' ||
+      lower === 'main.pdf' ||
+      lower === `${sanitized.toLowerCase()}.pdf` ||
+      lower === `${(projectName || '').toLowerCase()}.pdf`
+    ) {
+      return true
+    }
+  }
+
+  return false
+}
+
+/**
+ * Scan target directory on host recursively for legitimate source files.
+ * @param {string} targetDir
+ * @param {string} projectName
+ * @param {string} projectId
+ * @returns {Array<{ relPath: string, absPath: string, size: number, mtimeMs: number, isDoc: boolean }>}
+ */
+function scanHostDirectory(targetDir, projectName, projectId) {
+  const results = []
+
+  function walk(currentDir) {
+    let entries = []
+    try {
+      entries = fs.readdirSync(currentDir, { withFileTypes: true })
+    } catch {
+      return
+    }
+
+    for (const entry of entries) {
+      const fullPath = path.join(currentDir, entry.name)
+      const relPath = path.relative(targetDir, fullPath).replace(/\\/g, '/')
+
+      if (entry.isDirectory()) {
+        if (entry.name.startsWith('.') || entry.name === 'node_modules') continue
+        walk(fullPath)
+      } else if (entry.isFile()) {
+        if (shouldIgnoreHostFile(relPath, projectName, projectId)) continue
+        const v = validateRelativeEntityPath(relPath)
+        if (!v.ok) continue
+
+        try {
+          const st = fs.statSync(fullPath)
+          results.push({
+            relPath: v.relPath,
+            absPath: fullPath,
+            size: st.size,
+            mtimeMs: st.mtimeMs,
+            isDoc: isDocExtension(entry.name),
+          })
+        } catch {}
+      }
+    }
+  }
+
+  walk(targetDir)
+  return results
+}
+
 /**
  * Call the uid=1000 local-sync daemon over its internal Unix domain socket.
- * @param {'GET' | 'POST'} method
- * @param {string} endpoint
- * @param {Record<string, any>} [body]
- * @param {number} [timeoutMs]
- * @returns {Promise<{ statusCode: number, data: any }>}
  */
 function callDaemon(method, endpoint, body, timeoutMs = 60000) {
   return new Promise((resolve, reject) => {
@@ -104,18 +413,10 @@ async function getUserBaseDir(userId) {
   return DEFAULT_BASE_DIR
 }
 
-/**
- * Resolve effective target folder path on disk for a list of projects belonging
- * to a user (deterministic disambiguation if two default-folder projects share a name).
- * @param {string} baseDir
- * @param {Array<any>} projects
- * @returns {Map<string, { effectivePath: string, isCustom: boolean }>}
- */
 function resolveFolderPathsForProjects(baseDir, projects) {
   const result = new Map()
   const usedPaths = new Set()
 
-  // First register all explicit custom paths so default paths won't collide with them
   for (const project of projects) {
     const id = String(project._id || project.id)
     if (project.localFolderPath && typeof project.localFolderPath === 'string') {
@@ -129,7 +430,6 @@ function resolveFolderPathsForProjects(baseDir, projects) {
     }
   }
 
-  // Sort deterministically by project id for stable disambiguation
   const defaultProjects = projects
     .filter(p => !result.has(String(p._id || p.id)))
     .sort((a, b) => String(a._id || a.id).localeCompare(String(b._id || b.id)))
@@ -162,7 +462,6 @@ async function getResolvedProjectFolder(project, ownerBaseDir = null) {
     }
   }
 
-  // Fetch sibling projects of the owner to preserve deterministic disambiguation
   const siblingProjects = ownerId
     ? await Project.find(
         { owner_ref: ownerId },
@@ -185,15 +484,9 @@ async function getResolvedProjectFolder(project, ownerBaseDir = null) {
   }
 }
 
-/**
- * Build `localFolder` metadata for every project shown on `/project`.
- * @param {string} userId
- * @param {Array<any>} rawProjects
- */
 async function buildProjectFolderInfoMap(userId, rawProjects) {
   const userBaseDir = await getUserBaseDir(userId)
 
-  // Group by owner_ref so each owner's baseDir is respected cleanly
   const ownerBaseDirs = new Map([[String(userId), userBaseDir]])
   const otherOwnerIds = new Set()
   for (const p of rawProjects) {
@@ -269,9 +562,6 @@ async function buildProjectFolderInfoMap(userId, rawProjects) {
   return infoMap
 }
 
-/**
- * Locate the newest compiled `output.pdf` for a project on CLSI's local output/compiles disk.
- */
 function findLatestCompiledPdf(projectId, preferredBuild = null) {
   const outputBase = Settings?.path?.outputDir || '/var/lib/overleaf/data/output'
   const compilesBase =
@@ -311,7 +601,6 @@ function findLatestCompiledPdf(projectId, preferredBuild = null) {
     }
   }
 
-  // Scan outputBase/<projectId>* /generated-files/*/output.pdf
   try {
     const entries = fs.readdirSync(outputBase, { withFileTypes: true })
     for (const entry of entries) {
@@ -339,7 +628,6 @@ function findLatestCompiledPdf(projectId, preferredBuild = null) {
     }
   } catch {}
 
-  // Fallback: compilesBase/<projectId>*/output.pdf
   if (candidates.length === 0) {
     try {
       const entries = fs.readdirSync(compilesBase, { withFileTypes: true })
@@ -368,26 +656,298 @@ function findLatestCompiledPdf(projectId, preferredBuild = null) {
 }
 
 /**
- * Sync a single Overleaf project's readable files (.tex, .bib, assets, latest compiled PDF)
- * to its resolved local folder via the uid=1000 local-sync daemon.
- *
+ * Ingest new or modified files from host targetDir into Overleaf database/storage.
+ * Uses per-file 3-way baselines from .overleaf-sync.json so live Overleaf edits are never
+ * overwritten by stale host files while direct host modifications ingest cleanly.
  * @param {string} projectId
- * @param {{
- *   force?: boolean,
- *   oldDir?: string | null,
- *   cleanOld?: boolean,
- *   compiledPdf?: { buildId?: string, userId?: string } | null
- * }} [options]
+ * @param {{ userId?: string, force?: boolean, hostTriggered?: boolean, preferHost?: boolean, updateManifest?: boolean }} [options]
+ */
+async function syncFromLocalFolder(projectId, options = {}) {
+  const key = String(projectId)
+  activeIngests.add(key)
+
+  try {
+    const project = await ProjectGetter.promises.getProject(projectId, {
+      _id: 1,
+      name: 1,
+      owner_ref: 1,
+      trashed: 1,
+      lastUpdated: 1,
+      localFolderPath: 1,
+      localFolderSyncEnabled: 1,
+      localFolderLastSyncedPath: 1,
+      localFolderLastSyncedAt: 1,
+      rootFolder: 1,
+    })
+
+    if (!project) {
+      return { ok: false, skipped: true, reason: 'project_not_found' }
+    }
+
+    const ownerId = project.owner_ref ? String(project.owner_ref) : null
+    const effectiveUserId = options.userId || ownerId
+
+    const { effectivePath: targetDir, isCustom } =
+      await getResolvedProjectFolder(project)
+
+    if (!fs.existsSync(targetDir)) {
+      return { ok: false, skipped: true, reason: 'target_dir_not_found', targetDir }
+    }
+
+    // 1. Flush any pending in-memory edits before reading Overleaf docs
+    try {
+      await DocumentUpdaterHandler.promises.flushProjectToMongo(key)
+    } catch (flushErr) {
+      logger.warn(
+        { err: flushErr, projectId: key },
+        'local-sync: non-fatal error flushing project before host ingest'
+      )
+    }
+
+    // 2. Scan host directory and read existing sync manifest baselines
+    const hostFiles = scanHostDirectory(targetDir, project.name, key)
+    const manifest = readSyncManifest(targetDir)
+    const manifestFiles = manifest?.files || new Set()
+    const baselines = manifest?.baselines || {}
+    const lastSyncMs = project.localFolderLastSyncedAt
+      ? new Date(project.localFolderLastSyncedAt).getTime()
+      : 0
+    const ovUpdatedMs = project.lastUpdated
+      ? new Date(project.lastUpdated).getTime()
+      : 0
+
+    // 3. Get existing Overleaf docs and files with normalized relative keys (no leading '/')
+    const docsByRel = buildEntityLookup(
+      (await ProjectEntityHandler.promises.getAllDocs(key)) || {}
+    )
+    const filesByRel = buildEntityLookup(
+      (await ProjectEntityHandler.promises.getAllFiles(key)) || {}
+    )
+
+    const addedDocs = []
+    const updatedDocs = []
+    const addedFiles = []
+    const updatedFiles = []
+
+    // 4. Ingest only host files that genuinely changed on disk without clobbering Overleaf edits
+    for (const hostFile of hostFiles) {
+      const relPath = hostFile.relPath
+      const elementPath = `/${relPath}`
+      const base = baselines[relPath] || null
+      const hashInfo = computeHostFileHashInfo(hostFile)
+      if (!hashInfo) continue
+
+      if (hostFile.isDoc) {
+        const existingDoc = docsByRel.get(relPath) || null
+        const currentContent = existingDoc
+          ? normalizeDocText(Array.isArray(existingDoc.lines) ? existingDoc.lines.join('\n') : '')
+          : null
+        const ovHash =
+          currentContent !== null ? sha1Raw(Buffer.from(currentContent, 'utf8')) : null
+        const sameContent = ovHash !== null && ovHash === hashInfo.hostSha1
+        const hostChanged = base ? hashInfo.hostSha1 !== base.hostSha1 : true
+        const ovChanged = Boolean(base && ovHash !== null && ovHash !== base.overleafHash)
+
+        const ingest = shouldIngestEntry({
+          presentInOverleaf: Boolean(existingDoc),
+          sameContent,
+          hasBaseline: Boolean(base),
+          hostChanged,
+          ovChanged,
+          inManifest: manifestFiles.has(relPath),
+          hostMtimeMs: hostFile.mtimeMs,
+          ovUpdatedMs,
+          lastSyncMs,
+          hostTriggered: options.hostTriggered,
+          preferHost: options.preferHost,
+        })
+
+        if (!ingest) continue
+
+        const lines = hashInfo.rawContent.split(/\r\n|\n|\r/)
+        try {
+          await EditorController.promises.upsertDocWithPath(
+            key,
+            elementPath,
+            lines,
+            'local-sync',
+            effectiveUserId
+          )
+          if (existingDoc) {
+            updatedDocs.push(relPath)
+          } else {
+            addedDocs.push(relPath)
+          }
+        } catch (err) {
+          logger.warn(
+            { err, relPath, projectId: key },
+            `local-sync: failed ${existingDoc ? 'updating' : 'adding'} doc from host`
+          )
+        }
+      } else {
+        const existingFile = filesByRel.get(relPath) || null
+        const ovHash = existingFile?.hash || null
+        const sameContent = ovHash !== null && ovHash === hashInfo.hostGitHash
+        const hostChanged = base ? hashInfo.hostSha1 !== base.hostSha1 : true
+        const ovChanged = Boolean(base && ovHash !== null && ovHash !== base.overleafHash)
+
+        const ingest = shouldIngestEntry({
+          presentInOverleaf: Boolean(existingFile),
+          sameContent,
+          hasBaseline: Boolean(base),
+          hostChanged,
+          ovChanged,
+          inManifest: manifestFiles.has(relPath),
+          hostMtimeMs: hostFile.mtimeMs,
+          ovUpdatedMs,
+          lastSyncMs,
+          hostTriggered: options.hostTriggered,
+          preferHost: options.preferHost,
+        })
+
+        if (!ingest) continue
+
+        try {
+          await EditorController.promises.upsertFileWithPath(
+            key,
+            elementPath,
+            hostFile.absPath,
+            null,
+            'local-sync',
+            effectiveUserId
+          )
+          if (existingFile) {
+            updatedFiles.push(relPath)
+          } else {
+            addedFiles.push(relPath)
+          }
+        } catch (err) {
+          logger.warn(
+            { err, relPath, projectId: key },
+            `local-sync: failed ${existingFile ? 'updating' : 'adding'} binary file from host`
+          )
+        }
+      }
+    }
+
+    const refreshedDocs = buildEntityLookup(
+      (await ProjectEntityHandler.promises.getAllDocs(key)) || {}
+    )
+    const refreshedFiles = buildEntityLookup(
+      (await ProjectEntityHandler.promises.getAllFiles(key)) || {}
+    )
+
+    const allCurrentRelPaths = new Set([
+      ...refreshedDocs.keys(),
+      ...refreshedFiles.keys(),
+    ])
+    const totalFilesCount = allCurrentRelPaths.size
+    const syncedAtDate = new Date()
+
+    if (options.updateManifest !== false) {
+      const nextBaselines = {}
+      for (const [relPath, doc] of refreshedDocs.entries()) {
+        const content = Array.isArray(doc.lines) ? doc.lines.join('\n') : ''
+        nextBaselines[relPath] = {
+          hostSha1: sha1Raw(Buffer.from(normalizeDocText(content), 'utf8')),
+          overleafHash: sha1Raw(Buffer.from(content, 'utf8')),
+          kind: 'doc',
+        }
+      }
+      for (const [relPath, file] of refreshedFiles.entries()) {
+        const hf = hostFiles.find(h => h.relPath === relPath && !h.isDoc)
+        const base = baselines[relPath]
+        nextBaselines[relPath] = {
+          hostSha1: base?.hostSha1 || (hf ? computeHostFileHashInfo(hf)?.hostSha1 : null),
+          overleafHash: file?.hash || base?.overleafHash || null,
+          kind: 'file',
+        }
+      }
+      suppressWatcherUntil.set(key, Date.now() + WATCH_SUPPRESS_MS)
+      try {
+        await callDaemon('POST', '/manifest', {
+          projectId: key,
+          projectName: project.name,
+          targetDir,
+          files: Array.from(allCurrentRelPaths).sort(),
+          baselines: nextBaselines,
+        })
+      } catch {}
+    }
+
+    await Project.updateOne(
+      { _id: key },
+      {
+        $set: {
+          localFolderLastSyncedAt: syncedAtDate,
+          localFolderLastSyncStatus: 'synced',
+          localFolderLastSyncError: null,
+          localFolderLastSyncedPath: targetDir,
+          localFolderFileCount: totalFilesCount,
+        },
+      }
+    ).exec()
+
+    logger.info(
+      {
+        projectId: key,
+        targetDir,
+        addedDocsCount: addedDocs.length,
+        updatedDocsCount: updatedDocs.length,
+        addedFilesCount: addedFiles.length,
+        updatedFilesCount: updatedFiles.length,
+        totalFilesCount,
+      },
+      'local-sync: host ingest check finished'
+    )
+
+    return {
+      ok: true,
+      projectId: key,
+      targetDir,
+      isCustom,
+      addedDocs,
+      updatedDocs,
+      addedFiles,
+      updatedFiles,
+      totalFilesCount,
+      syncedAt: syncedAtDate.toISOString(),
+    }
+  } finally {
+    // Clear any sync scheduled during our own ingest unless an export step follows
+    if (options.updateManifest !== false) {
+      const existing = pendingSyncs.get(key)
+      if (existing?.timer) {
+        clearTimeout(existing.timer)
+      }
+      pendingSyncs.delete(key)
+    }
+    activeIngests.delete(key)
+  }
+}
+
+/**
+ * Sync a project between Overleaf and its local host folder.
+ * Serialized per project to prevent concurrent read/write races.
  */
 async function syncProject(projectId, options = {}) {
+  const key = String(projectId)
+  return await withProjectSyncLock(key, () => syncProjectUnlocked(key, options))
+}
+
+async function syncProjectUnlocked(key, options = {}) {
   const {
     force = false,
     oldDir = null,
     cleanOld = false,
     compiledPdf = null,
+    direction = 'overleaf-to-host',
+    hostTriggered = false,
+    preferHost = false,
+    userId = null,
   } = options
 
-  const project = await ProjectGetter.promises.getProject(projectId, {
+  const project = await ProjectGetter.promises.getProject(key, {
     _id: 1,
     name: 1,
     owner_ref: 1,
@@ -395,7 +955,6 @@ async function syncProject(projectId, options = {}) {
     localFolderPath: 1,
     localFolderSyncEnabled: 1,
     localFolderLastSyncedPath: 1,
-    'overleaf.history.id': 1,
   })
 
   if (!project) {
@@ -414,40 +973,46 @@ async function syncProject(projectId, options = {}) {
   const { effectivePath: targetDir, isCustom } =
     await getResolvedProjectFolder(project)
 
-  const jobId = `${projectId}-${Date.now()}-${crypto.randomBytes(4).toString('hex')}`
+  watchProjectFolder(key, targetDir, userId || ownerId, project.name)
+
+  // Step 1: Only ingest from host when direction includes host-to-overleaf
+  let ingestResult = null
+  if (direction === 'bidirectional' || direction === 'host-to-overleaf') {
+    if (fs.existsSync(targetDir)) {
+      ingestResult = await syncFromLocalFolder(key, {
+        userId,
+        force,
+        hostTriggered,
+        preferHost,
+        updateManifest: direction === 'host-to-overleaf',
+      })
+    }
+  }
+
+  if (direction === 'host-to-overleaf') {
+    return ingestResult || { ok: true, targetDir, isCustom }
+  }
+
+  // Step 2: Overleaf to host staging and atomic export
+  const jobId = `${key}-${Date.now()}-${crypto.randomBytes(4).toString('hex')}`
   const stagingDir = path.join(STAGE_ROOT, jobId)
+  activeExports.add(key)
 
   try {
-    // 1. Flush any pending in-memory edits from document-updater to docstore/Mongo
     try {
-      await DocumentUpdaterHandler.promises.flushProjectToMongo(
-        String(projectId)
-      )
-    } catch (flushErr) {
-      logger.warn(
-        { err: flushErr, projectId },
-        'local-sync: non-fatal error flushing project from document-updater'
-      )
-    }
+      await DocumentUpdaterHandler.promises.flushProjectToMongo(key)
+    } catch {}
 
-    // 2. Stage docs and binary files
     fs.mkdirSync(stagingDir, { recursive: true, mode: 0o755 })
 
     const stagedRelFiles = []
     const stagedSet = new Set()
+    const baselines = {}
 
-    const docs = await ProjectEntityHandler.promises.getAllDocs(
-      String(projectId)
-    )
+    const docs = await ProjectEntityHandler.promises.getAllDocs(key)
     for (const [rawDocPath, doc] of Object.entries(docs || {})) {
       const v = validateRelativeEntityPath(rawDocPath)
-      if (!v.ok) {
-        logger.warn(
-          { projectId, rawDocPath, reason: v.error },
-          'local-sync: skipping unsafe doc path'
-        )
-        continue
-      }
+      if (!v.ok) continue
       const dest = path.resolve(stagingDir, v.relPath)
       fs.mkdirSync(path.dirname(dest), { recursive: true, mode: 0o755 })
       const content = Array.isArray(doc.lines) ? doc.lines.join('\n') : ''
@@ -456,47 +1021,46 @@ async function syncProject(projectId, options = {}) {
         stagedSet.add(v.relPath)
         stagedRelFiles.push(v.relPath)
       }
+      baselines[v.relPath] = {
+        hostSha1: sha1Raw(Buffer.from(normalizeDocText(content), 'utf8')),
+        overleafHash: sha1Raw(Buffer.from(content, 'utf8')),
+        kind: 'doc',
+      }
     }
 
-    const files = await ProjectEntityHandler.promises.getAllFiles(
-      String(projectId)
-    )
+    const files = await ProjectEntityHandler.promises.getAllFiles(key)
     for (const [rawFilePath, file] of Object.entries(files || {})) {
       if (!file || !file.hash) continue
       const v = validateRelativeEntityPath(rawFilePath)
-      if (!v.ok) {
-        logger.warn(
-          { projectId, rawFilePath, reason: v.error },
-          'local-sync: skipping unsafe file path'
-        )
-        continue
-      }
+      if (!v.ok) continue
       const dest = path.resolve(stagingDir, v.relPath)
       fs.mkdirSync(path.dirname(dest), { recursive: true, mode: 0o755 })
       try {
         const { stream } =
-          await HistoryManager.promises.requestBlobWithProjectId(
-            String(projectId),
-            file.hash
-          )
+          await HistoryManager.promises.requestBlobWithProjectId(key, file.hash)
         await pipeline(stream, fs.createWriteStream(dest, { mode: 0o644 }))
+        const hostSha1 = await sha1FileStream(dest)
         if (!stagedSet.has(v.relPath)) {
           stagedSet.add(v.relPath)
           stagedRelFiles.push(v.relPath)
         }
+        baselines[v.relPath] = {
+          hostSha1,
+          overleafHash: file.hash,
+          kind: 'file',
+        }
       } catch (blobErr) {
         logger.warn(
-          { err: blobErr, projectId, filePath: v.relPath, hash: file.hash },
+          { err: blobErr, projectId: key, filePath: v.relPath, hash: file.hash },
           'local-sync: failed fetching binary file blob'
         )
       }
     }
 
-    // 3. Include latest compiled PDF if available
     let hasPdf = false
-    const pdfSourcePath = findLatestCompiledPdf(String(projectId), compiledPdf)
+    const pdfSourcePath = findLatestCompiledPdf(key, compiledPdf)
     if (pdfSourcePath) {
-      let pdfName = `${sanitizeProjectFolderName(project.name, projectId)}.pdf`
+      let pdfName = `${sanitizeProjectFolderName(project.name, key)}.pdf`
       if (stagedSet.has(pdfName)) {
         pdfName = stagedSet.has('output.pdf')
           ? '_overleaf_compiled_output.pdf'
@@ -509,15 +1073,9 @@ async function syncProject(projectId, options = {}) {
         stagedSet.add(pdfName)
         stagedRelFiles.push(pdfName)
         hasPdf = true
-      } catch (pdfErr) {
-        logger.warn(
-          { err: pdfErr, projectId, pdfSourcePath },
-          'local-sync: failed staging compiled PDF'
-        )
-      }
+      } catch {}
     }
 
-    // 4. Send to uid=1000 local-sync daemon for atomic host write
     const effectiveOldDir =
       oldDir ||
       (cleanOld &&
@@ -526,12 +1084,15 @@ async function syncProject(projectId, options = {}) {
         ? project.localFolderLastSyncedPath
         : null)
 
+    suppressWatcherUntil.set(key, Date.now() + WATCH_SUPPRESS_MS)
+
     const { statusCode, data } = await callDaemon('POST', '/sync', {
-      projectId: String(projectId),
+      projectId: key,
       projectName: project.name,
       targetDir,
       stagingDir,
       files: stagedRelFiles,
+      baselines,
       oldDir: effectiveOldDir,
       cleanOld: Boolean(cleanOld && effectiveOldDir),
     })
@@ -539,7 +1100,7 @@ async function syncProject(projectId, options = {}) {
     if (statusCode !== 200 || !data?.ok) {
       const errorMsg = data?.error || `Sync failed (HTTP ${statusCode})`
       await Project.updateOne(
-        { _id: projectId },
+        { _id: key },
         {
           $set: {
             localFolderLastSyncStatus: 'error',
@@ -557,7 +1118,7 @@ async function syncProject(projectId, options = {}) {
 
     const syncedAtDate = new Date(data.syncedAt || Date.now())
     await Project.updateOne(
-      { _id: projectId },
+      { _id: key },
       {
         $set: {
           localFolderLastSyncedAt: syncedAtDate,
@@ -572,7 +1133,7 @@ async function syncProject(projectId, options = {}) {
 
     return {
       ok: true,
-      projectId: String(projectId),
+      projectId: key,
       projectName: project.name,
       targetDir: data.targetDir,
       isCustom,
@@ -580,14 +1141,15 @@ async function syncProject(projectId, options = {}) {
       removedStaleCount: data.removedStaleCount,
       cleanedOldDir: data.cleanedOldDir,
       hasPdf,
+      ingestResult,
       syncedAt: syncedAtDate.toISOString(),
     }
   } catch (err) {
     const errorMsg = err?.message || 'Unexpected error during local folder sync'
-    logger.error({ err, projectId, targetDir }, 'local-sync: syncProject failed')
+    logger.error({ err, projectId: key, targetDir }, 'local-sync: syncProject failed')
     try {
       await Project.updateOne(
-        { _id: projectId },
+        { _id: key },
         {
           $set: {
             localFolderLastSyncStatus: 'error',
@@ -598,6 +1160,8 @@ async function syncProject(projectId, options = {}) {
     } catch {}
     return { ok: false, error: errorMsg, targetDir, isCustom }
   } finally {
+    suppressWatcherUntil.set(key, Date.now() + WATCH_SUPPRESS_MS)
+    activeExports.delete(key)
     try {
       fs.rmSync(stagingDir, { recursive: true, force: true })
     } catch {}
@@ -605,16 +1169,282 @@ async function syncProject(projectId, options = {}) {
 }
 
 /**
- * Debounced non-blocking background sync trigger for editor/upload/rename/compile events.
- * Never throws into Overleaf's core request path.
+ * Determine whether any file on host disk actually differs from its last synced baseline
+ * (or was newly added on host). Shared by both loadEditor check and fs.watch debounce.
+ */
+async function detectHostChanges(projectId, targetDir, projectName, lastSyncMs = 0) {
+  const key = String(projectId)
+  if (!fs.existsSync(targetDir)) {
+    return { hostChanged: false, needsExport: false }
+  }
+
+  const hostFiles = scanHostDirectory(targetDir, projectName, key)
+  const manifest = readSyncManifest(targetDir)
+  const baselines = manifest?.baselines || null
+  const manifestFiles = manifest?.files || new Set()
+
+  const docsByRel = buildEntityLookup(
+    (await ProjectEntityHandler.promises.getAllDocs(key)) || {}
+  )
+  const filesByRel = buildEntityLookup(
+    (await ProjectEntityHandler.promises.getAllFiles(key)) || {}
+  )
+
+  for (const hf of hostFiles) {
+    const relPath = hf.relPath
+    const base = baselines?.[relPath] || null
+    if (base && base.hostSha1) {
+      if (
+        Math.abs(hf.mtimeMs - Number(base.mtimeMs || 0)) < 1 &&
+        hf.size === Number(base.size ?? -1)
+      ) {
+        continue
+      }
+      const hashInfo = computeHostFileHashInfo(hf)
+      if (hashInfo && hashInfo.hostSha1 !== base.hostSha1) {
+        return { hostChanged: true, reason: 'baseline_mismatch', relPath }
+      }
+      continue
+    }
+
+    const existingDoc = hf.isDoc ? docsByRel.get(relPath) : null
+    const existingFile = !hf.isDoc ? filesByRel.get(relPath) : null
+    const isTracked = Boolean(existingDoc || existingFile)
+    if (!isTracked) {
+      if (!manifestFiles.has(relPath) || hf.mtimeMs > lastSyncMs + 1000) {
+        return { hostChanged: true, reason: 'new_host_file', relPath }
+      }
+      continue
+    }
+
+    if (hf.mtimeMs > lastSyncMs + 1000) {
+      const hashInfo = computeHostFileHashInfo(hf)
+      if (!hashInfo) continue
+      if (existingDoc) {
+        const currentText = normalizeDocText(
+          Array.isArray(existingDoc.lines) ? existingDoc.lines.join('\n') : ''
+        )
+        const ovSha1 = sha1Raw(Buffer.from(currentText, 'utf8'))
+        if (ovSha1 !== hashInfo.hostSha1) {
+          return { hostChanged: true, reason: 'legacy_doc_modified', relPath }
+        }
+      } else if (existingFile && existingFile.hash !== hashInfo.hostGitHash) {
+        return { hostChanged: true, reason: 'legacy_file_modified', relPath }
+      }
+    }
+  }
+
+  let needsExport = !manifest || !baselines
+  if (!needsExport && baselines) {
+    for (const [relPath, doc] of docsByRel.entries()) {
+      const content = Array.isArray(doc.lines) ? doc.lines.join('\n') : ''
+      const ovSha1 = sha1Raw(Buffer.from(content, 'utf8'))
+      if (!baselines[relPath] || baselines[relPath].overleafHash !== ovSha1) {
+        needsExport = true
+        break
+      }
+    }
+  }
+  if (!needsExport && baselines) {
+    for (const [relPath, file] of filesByRel.entries()) {
+      if (!baselines[relPath] || baselines[relPath].overleafHash !== file?.hash) {
+        needsExport = true
+        break
+      }
+    }
+  }
+
+  return { hostChanged: false, needsExport }
+}
+
+/**
+ * Check if the host folder has genuine content changes that need to be ingested into Overleaf.
+ * Called when an editor session is loaded (/project/:Project_id).
+ * Never overwrites live Overleaf edits when the host folder did not change.
+ */
+async function syncFromLocalFolderIfChanged(projectId, options = {}) {
+  const key = String(projectId)
+  if (activeIngests.has(key) || activeExports.has(key)) {
+    return { changed: false }
+  }
+  try {
+    const project = await ProjectGetter.promises.getProject(key, {
+      _id: 1,
+      name: 1,
+      owner_ref: 1,
+      trashed: 1,
+      localFolderPath: 1,
+      localFolderSyncEnabled: 1,
+      localFolderLastSyncedAt: 1,
+    })
+
+    if (!project || project.localFolderSyncEnabled === false) {
+      return { changed: false }
+    }
+
+    const { effectivePath: targetDir } = await getResolvedProjectFolder(project)
+    if (!fs.existsSync(targetDir)) {
+      return { changed: false }
+    }
+
+    watchProjectFolder(key, targetDir, options.userId || project.owner_ref, project.name)
+
+    const lastSyncMs = project.localFolderLastSyncedAt
+      ? new Date(project.localFolderLastSyncedAt).getTime()
+      : 0
+
+    const detection = await detectHostChanges(key, targetDir, project.name, lastSyncMs)
+
+    if (detection.hostChanged) {
+      logger.info(
+        { projectId: key, targetDir, reason: detection.reason, relPath: detection.relPath },
+        'local-sync: detected genuine host folder edit on load, syncing into Overleaf'
+      )
+      const result = await syncProject(key, {
+        direction: 'bidirectional',
+        hostTriggered: true,
+        userId: options.userId,
+        force: true,
+      })
+      return { changed: true, result }
+    }
+
+    if (detection.needsExport) {
+      scheduleSync(key, { direction: 'overleaf-to-host', userId: options.userId })
+    }
+
+    return { changed: false }
+  } catch (err) {
+    logger.warn({ err, projectId: key }, 'local-sync: error during syncFromLocalFolderIfChanged')
+    return { changed: false, error: err?.message }
+  }
+}
+
+/**
+ * Watch project folder for changes on host filesystem and automatically sync them into Overleaf.
+ */
+function watchProjectFolder(projectId, targetDir, userId, projectName = '') {
+  const key = String(projectId)
+  if (activeWatchers.has(key)) {
+    const existing = activeWatchers.get(key)
+    if (existing.targetDir === targetDir) {
+      if (projectName) existing.projectName = projectName
+      return
+    }
+    try {
+      existing.watcher.close()
+    } catch {}
+    activeWatchers.delete(key)
+  }
+
+  try {
+    if (!fs.existsSync(targetDir)) return
+    let debounceTimer = null
+    const watcherEntry = { watcher: null, targetDir, projectName: projectName || '' }
+
+    const watcher = fs.watch(
+      targetDir,
+      { recursive: true },
+      (eventType, filename) => {
+        if (!filename) return
+        const relCandidate = String(filename).replace(/\\/g, '/')
+        if (shouldIgnoreHostFile(relCandidate, watcherEntry.projectName, key)) return
+        if (
+          activeIngests.has(key) ||
+          activeExports.has(key) ||
+          Date.now() < (suppressWatcherUntil.get(key) || 0)
+        ) {
+          return
+        }
+
+        if (debounceTimer) clearTimeout(debounceTimer)
+        debounceTimer = setTimeout(async () => {
+          debounceTimer = null
+          if (
+            activeIngests.has(key) ||
+            activeExports.has(key) ||
+            Date.now() < (suppressWatcherUntil.get(key) || 0)
+          ) {
+            return
+          }
+          try {
+            const detection = await detectHostChanges(
+              key,
+              targetDir,
+              watcherEntry.projectName,
+              0
+            )
+            if (!detection.hostChanged) {
+              return
+            }
+            logger.info(
+              { projectId: key, filename: detection.relPath || relCandidate, eventType, reason: detection.reason },
+              'local-sync: host change verified via watcher, syncing into Overleaf'
+            )
+            await syncProject(key, {
+              direction: 'bidirectional',
+              hostTriggered: true,
+              userId,
+              force: true,
+            })
+          } catch (err) {
+            logger.warn({ err, projectId: key }, 'local-sync: watcher sync failed')
+          }
+        }, 1200)
+
+        if (typeof debounceTimer.unref === 'function') {
+          debounceTimer.unref()
+        }
+      }
+    )
+
+    if (typeof watcher.unref === 'function') {
+      watcher.unref()
+    }
+
+    watcher.on('error', err => {
+      logger.warn({ err, projectId: key, targetDir }, 'local-sync: watcher error')
+      try {
+        watcher.close()
+      } catch {}
+      activeWatchers.delete(key)
+    })
+
+    watcherEntry.watcher = watcher
+    activeWatchers.set(key, watcherEntry)
+  } catch (err) {
+    logger.warn(
+      { err, projectId: key, targetDir },
+      'local-sync: failed starting directory watcher'
+    )
+  }
+}
+
+function unwatchProjectFolder(projectId) {
+  const key = String(projectId)
+  if (activeWatchers.has(key)) {
+    try {
+      activeWatchers.get(key).watcher.close()
+    } catch {}
+    activeWatchers.delete(key)
+  }
+}
+
+/**
+ * Debounced sync trigger for Overleaf editor/upload/rename/compile events.
  */
 function scheduleSync(projectId, options = {}) {
   if (!projectId) return
   const key = String(projectId)
+  if (activeIngests.has(key) || activeExports.has(key)) return
+
   const existing = pendingSyncs.get(key)
+  const direction =
+    options.direction || existing?.options?.direction || 'overleaf-to-host'
   const mergedOptions = {
     ...(existing?.options || {}),
     ...options,
+    direction,
     cleanOld: Boolean(existing?.options?.cleanOld || options.cleanOld),
     oldDir: options.oldDir || existing?.options?.oldDir || null,
     compiledPdf: options.compiledPdf || existing?.options?.compiledPdf || null,
@@ -625,6 +1455,7 @@ function scheduleSync(projectId, options = {}) {
 
   const timer = setTimeout(() => {
     pendingSyncs.delete(key)
+    if (activeIngests.has(key)) return
     syncProject(key, mergedOptions).catch(err => {
       logger.error({ err, projectId: key }, 'local-sync: background sync failed')
     })
@@ -686,7 +1517,6 @@ async function updateBaseDir(
   }
   const normalizedBaseDir = data.normalizedPath
 
-  // Make sure the chosen baseDir is not itself a project's synced folder
   if (data.existingProjectId) {
     const err = new Error(
       `This folder is already synced directly to project "${data.existingProjectName || data.existingProjectId}". Choose a parent/base directory instead.`
@@ -713,7 +1543,6 @@ async function updateBaseDir(
     p => !ProjectHelper.isTrashed(p, userId)
   )
 
-  // Ensure no project's custom folder equals the baseDir itself
   for (const p of activeProjects) {
     if (
       p.localFolderPath &&
@@ -729,20 +1558,17 @@ async function updateBaseDir(
 
   const oldMap = resolveFolderPathsForProjects(oldBaseDir, activeProjects)
 
-  // Persist user's new base dir
   await User.updateOne(
     { _id: userId },
     { $set: { localSyncBaseDir: normalizedBaseDir } }
   ).exec()
 
-  // Ensure the base directory itself exists on disk right away
   await callDaemon('POST', '/mkdir', { path: normalizedBaseDir })
 
   const syncResults = []
   if (syncAll) {
     for (const p of activeProjects) {
       if (p.localFolderSyncEnabled === false) continue
-      // Only projects using the default base dir change path, though syncing them all ensures everything is up to date
       if (p.localFolderPath) continue
       const prevInfo = oldMap.get(String(p._id))
       const oldDir =
@@ -803,7 +1629,6 @@ async function updateProjectFolder(
     }
     normalizedCustomPath = data.normalizedPath
 
-    // Reject if the target folder already has a manifest for a DIFFERENT project
     if (
       data.existingProjectId &&
       String(data.existingProjectId) !== String(projectId)
@@ -815,7 +1640,6 @@ async function updateProjectFolder(
       throw err
     }
 
-    // Reject if the custom path equals baseDir itself
     if (normalizedCustomPath.toLowerCase() === baseDir.toLowerCase()) {
       const err = new Error(
         `Choose a subfolder inside "${baseDir}" rather than the base folder itself.`
@@ -824,7 +1648,6 @@ async function updateProjectFolder(
       throw err
     }
 
-    // Check against ALL other non-trashed projects owned by this user + any project with custom localFolderPath
     const otherProjects = await Project.find(
       {
         _id: { $ne: project._id },
@@ -882,12 +1705,17 @@ async function updateProjectFolder(
     }
   ).exec()
 
+  if (!syncEnabled) {
+    unwatchProjectFolder(projectId)
+  }
+
   let syncResult = null
   if (syncEnabled && syncNow) {
     syncResult = await syncProject(String(projectId), {
       force: true,
       oldDir,
       cleanOld: Boolean(cleanOld),
+      userId,
     })
     if (!syncResult.ok) {
       const err = new Error(syncResult.error || 'Failed to sync to new folder')
@@ -964,7 +1792,7 @@ async function syncAllUserProjects(userId) {
 
   const results = []
   for (const p of candidates) {
-    const res = await syncProject(String(p._id), { force: false })
+    const res = await syncProject(String(p._id), { force: false, userId })
     results.push(res)
   }
 
@@ -1047,12 +1875,16 @@ const LocalProjectSyncManager = {
   updateBaseDir,
   updateProjectFolder,
   syncProject,
+  syncFromLocalFolder,
+  syncFromLocalFolderIfChanged,
   syncAllUserProjects,
   scheduleSync,
   buildProjectFolderInfoMap,
   getProjectFolderInfo,
   browseDirectories,
   createDirectory,
+  watchProjectFolder,
+  unwatchProjectFolder,
 }
 
 export default LocalProjectSyncManager

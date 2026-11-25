@@ -140,13 +140,30 @@ async function updateProjectFolder(req, res) {
   }
 }
 
+async function getProjectFolder(req, res) {
+  const userId = SessionManager.getLoggedInUserId(req.session)
+  try {
+    const { params } = parseReq(req, syncProjectSchema)
+    const localFolder = await LocalProjectSyncManager.getProjectFolderInfo(
+      params.Project_id,
+      userId
+    )
+    if (!localFolder) {
+      return res.status(404).json({ ok: false, message: 'Project not found' })
+    }
+    res.json({ ok: true, localFolder })
+  } catch (err) {
+    sendError(res, err, 'Failed to get project folder info')
+  }
+}
+
 async function syncProject(req, res) {
   const userId = SessionManager.getLoggedInUserId(req.session)
   try {
     const { params } = parseReq(req, syncProjectSchema)
     const syncResult = await LocalProjectSyncManager.syncProject(
       params.Project_id,
-      { force: true }
+      { force: true, userId, direction: 'bidirectional' }
     )
     const localFolder = await LocalProjectSyncManager.getProjectFolderInfo(
       params.Project_id,
@@ -176,5 +193,6 @@ export default {
   browse: expressify(browse),
   createDirectory: expressify(createDirectory),
   updateProjectFolder: expressify(updateProjectFolder),
+  getProjectFolder: expressify(getProjectFolder),
   syncProject: expressify(syncProject),
 }

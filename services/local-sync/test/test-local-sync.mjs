@@ -191,13 +191,37 @@ try {
     targetDir: folderA1,
     stagingDir: stage1,
     files: ['main.tex', 'sections/intro.tex'],
+    baselines: {
+      'main.tex': { hostSha1: 'h1', overleafHash: 'o1', kind: 'doc' },
+      'sections/intro.tex': { hostSha1: 'h2', overleafHash: 'o2', kind: 'doc' },
+    },
   })
   assert.equal(s1.status, 200)
   assert.equal(s1.data.syncedFilesCount, 2)
+  assert.equal(s1.data.writtenFilesCount, 2)
   assert.equal(
     fs.readFileSync(path.join(folderA1, 'main.tex'), 'utf8'),
     '\\documentclass{article}\n'
   )
+  const manifest1 = JSON.parse(
+    fs.readFileSync(path.join(folderA1, '.overleaf-sync.json'), 'utf8')
+  )
+  assert.equal(manifest1.baselines['main.tex'].hostSha1, 'h1')
+  assert.equal(typeof manifest1.baselines['main.tex'].mtimeMs, 'number')
+
+  // Unchanged re-sync must skip writing identical files
+  const prevIntroMtime = fs.statSync(path.join(folderA1, 'sections/intro.tex')).mtimeMs
+  const s1Repeat = await reqDaemon('POST', '/sync', {
+    projectId: 'projA',
+    projectName: 'PaperA',
+    targetDir: folderA1,
+    stagingDir: stage1,
+    files: ['main.tex', 'sections/intro.tex'],
+  })
+  assert.equal(s1Repeat.status, 200)
+  assert.equal(s1Repeat.data.writtenFilesCount, 0)
+  assert.equal(s1Repeat.data.skippedUnchangedCount, 2)
+  assert.equal(fs.statSync(path.join(folderA1, 'sections/intro.tex')).mtimeMs, prevIntroMtime)
 
   // Add a personal user file inside folderA1 -> must NEVER be deleted
   fs.writeFileSync(path.join(folderA1, 'my-personal-notes.txt'), 'keep me!')
@@ -255,6 +279,22 @@ try {
     'keep me!',
     'old personal file preserved even after cleanOld'
   )
+
+  // 7. POST /manifest updates baselines safely under uid=1000
+  const mUpd = await reqDaemon('POST', '/manifest', {
+    projectId: 'projA',
+    projectName: 'PaperA',
+    targetDir: folderA2,
+    files: ['main.tex'],
+    baselines: {
+      'main.tex': { hostSha1: 'customsha', overleafHash: 'ovsha', kind: 'doc' },
+    },
+  })
+  assert.equal(mUpd.status, 200)
+  const manifestAfter = JSON.parse(
+    fs.readFileSync(path.join(folderA2, '.overleaf-sync.json'), 'utf8')
+  )
+  assert.equal(manifestAfter.baselines['main.tex'].overleafHash, 'ovsha')
 
   console.log('[pass] local-sync daemon integration tests passed')
 } finally {

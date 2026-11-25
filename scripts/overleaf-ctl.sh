@@ -26,7 +26,7 @@ PARENT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 
 if [[ -n "${OVERLEAF_TOOLKIT_DIR:-}" && -d "$OVERLEAF_TOOLKIT_DIR" ]]; then
   TOOLKIT_ROOT="$OVERLEAF_TOOLKIT_DIR"
-elif [[ -f "$PARENT_DIR/config/overleaf.rc" ]]; then
+elif [[ -f "$PARENT_DIR/config/overleaf.rc" || -f "$PARENT_DIR/docker-compose.yml" ]]; then
   TOOLKIT_ROOT="$PARENT_DIR"
 elif [[ -f "$PARENT_DIR/overleaf-toolkit/config/overleaf.rc" ]]; then
   TOOLKIT_ROOT="$PARENT_DIR/overleaf-toolkit"
@@ -34,6 +34,24 @@ elif [[ -f "$HOME/overleaf-toolkit/config/overleaf.rc" ]]; then
   TOOLKIT_ROOT="$HOME/overleaf-toolkit"
 else
   TOOLKIT_ROOT="$PARENT_DIR"
+fi
+
+# Source optional .env from standalone Compose root cleanly before resolving defaults
+ENV_FILE=""
+if [[ -f "$TOOLKIT_ROOT/.env" ]]; then
+  ENV_FILE="$TOOLKIT_ROOT/.env"
+elif [[ -f "$PARENT_DIR/.env" ]]; then
+  ENV_FILE="$PARENT_DIR/.env"
+fi
+if [[ -n "$ENV_FILE" ]]; then
+  while IFS='=' read -r k v; do
+    [[ -z "$k" || "$k" == \#* ]] && continue
+    k="${k//[$'\r\n ']/}"
+    v="${v%$'\r'}"
+    if [[ -n "$k" && -z "${!k:-}" ]]; then
+      export "$k=$v"
+    fi
+  done < "$ENV_FILE"
 fi
 
 SHARELATEX_CONTAINER="${OVERLEAF_SHARELATEX_CONTAINER:-sharelatex}"
@@ -250,17 +268,22 @@ wait_for_redis() {
 wait_for_web() {
   local i code
   local url="http://127.0.0.1:${OVERLEAF_PORT}/login"
-  for i in $(seq 1 90); do
-    if command -v curl >/dev/null 2>&1; then
+  if command -v curl >/dev/null 2>&1; then
+    for i in $(seq 1 90); do
       code="$(curl -s -o /dev/null -w '%{http_code}' "$url" || true)"
       if [[ "$code" == "200" || "$code" == "302" ]]; then
         return 0
       fi
-    elif docker exec "$SHARELATEX_CONTAINER" bash -lc 'curl -sf -o /dev/null http://127.0.0.1:4000/login' >/dev/null 2>&1; then
-      return 0
-    fi
-    sleep 1
-  done
+      sleep 1
+    done
+  else
+    for i in $(seq 1 90); do
+      if docker exec "$SHARELATEX_CONTAINER" bash -lc 'curl -sf -o /dev/null http://127.0.0.1:3000/status' >/dev/null 2>&1; then
+        return 0
+      fi
+      sleep 1
+    done
+  fi
   echo "Warning: Overleaf web did not respond on $url within 90s; check logs." >&2
   return 1
 }
@@ -325,8 +348,14 @@ cmd_resume() {
     if [[ -x "$TOOLKIT_ROOT/bin/up" ]]; then
       echo "[start] Missing container(s); provisioning via toolkit bin/up -d..."
       "$TOOLKIT_ROOT/bin/up" -d
+    elif [[ -f "$TOOLKIT_ROOT/docker-compose.yml" ]]; then
+      echo "[start] Missing container(s); provisioning via docker compose up -d..."
+      docker compose -f "$TOOLKIT_ROOT/docker-compose.yml" up -d
+    elif [[ -f "$PARENT_DIR/docker-compose.yml" ]]; then
+      echo "[start] Missing container(s); provisioning via docker compose up -d..."
+      docker compose -f "$PARENT_DIR/docker-compose.yml" up -d
     else
-      echo "Error: Containers not found and $TOOLKIT_ROOT/bin/up missing." >&2
+      echo "Error: Containers not found and neither bin/up nor docker-compose.yml was located." >&2
       exit 1
     fi
   else

@@ -61,9 +61,11 @@ else:
 PY
 }
 
-# 1. Global threadpool and glibc arena limits for all Overleaf Node services
+# 1. Global threadpool, malloc arena, and faster OT flush settings for Overleaf Node services
 ensure_env_export "/etc/overleaf/env.sh" "UV_THREADPOOL_SIZE" "4"
 ensure_env_export "/etc/overleaf/env.sh" "MALLOC_ARENA_MAX" "2"
+ensure_env_export "/etc/overleaf/env.sh" "MAX_UNFLUSHED_AGE_SECONDS" "15"
+ensure_env_export "/etc/overleaf/env.sh" "CONTINUOUS_BACKGROUND_FLUSH" "true"
 
 if [[ -f /etc/service/history-v1-overleaf/run ]]; then
   python3 - "/etc/service/history-v1-overleaf/run" <<'PY'

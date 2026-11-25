@@ -771,6 +771,12 @@ async function initialize(webRouter, privateApiRouter, publicApiRouter) {
     AuthorizationMiddleware.ensureUserCanAdminProject,
     LocalProjectSyncController.updateProjectFolder
   )
+  webRouter.get(
+    '/project/:Project_id/local-folder',
+    AuthenticationController.requireLogin(),
+    AuthorizationMiddleware.ensureUserCanReadProject,
+    LocalProjectSyncController.getProjectFolder
+  )
   webRouter.post(
     '/project/:Project_id/local-sync',
     AuthenticationController.requireLogin(),

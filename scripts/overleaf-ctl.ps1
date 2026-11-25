@@ -15,7 +15,7 @@ $ParentDir = Split-Path -Parent $ScriptDir
 
 if ($env:OVERLEAF_TOOLKIT_DIR -and (Test-Path $env:OVERLEAF_TOOLKIT_DIR)) {
   $ToolkitRoot = $env:OVERLEAF_TOOLKIT_DIR
-} elseif (Test-Path (Join-Path $ParentDir 'config\overleaf.rc')) {
+} elseif ((Test-Path (Join-Path $ParentDir 'config\overleaf.rc')) -or (Test-Path (Join-Path $ParentDir 'docker-compose.yml'))) {
   $ToolkitRoot = $ParentDir
 } elseif (Test-Path (Join-Path $ParentDir 'overleaf-toolkit\config\overleaf.rc')) {
   $ToolkitRoot = Join-Path $ParentDir 'overleaf-toolkit'
@@ -23,6 +23,19 @@ if ($env:OVERLEAF_TOOLKIT_DIR -and (Test-Path $env:OVERLEAF_TOOLKIT_DIR)) {
   $ToolkitRoot = Join-Path $HOME 'overleaf-toolkit'
 } else {
   $ToolkitRoot = $ParentDir
+}
+
+$EnvCandidates = @((Join-Path $ToolkitRoot '.env'), (Join-Path $ParentDir '.env')) | Where-Object { Test-Path $_ }
+foreach ($envPath in $EnvCandidates | Select-Object -First 1) {
+  foreach ($line in Get-Content $envPath) {
+    if ($line -match '^\s*([^#=]+)=(.*)$') {
+      $k = $Matches[1].Trim()
+      $v = $Matches[2].Trim()
+      if ($k -and -not [Environment]::GetEnvironmentVariable($k)) {
+        [Environment]::SetEnvironmentVariable($k, $v, 'Process')
+      }
+    }
+  }
 }
 
 $Sharelatex = if ($env:OVERLEAF_SHARELATEX_CONTAINER) { $env:OVERLEAF_SHARELATEX_CONTAINER } else { 'sharelatex' }
@@ -79,17 +92,23 @@ function Invoke-BinaryProcessToFile([string]$FileName, [string[]]$Arguments, [st
   $psi.RedirectStandardOutput = $true
   $psi.RedirectStandardError = $true
   $proc = [System.Diagnostics.Process]::Start($psi)
+  $errBuilder = New-Object System.Text.StringBuilder
+  $errHandler = [System.Diagnostics.DataReceivedEventHandler]{
+    param($sender, $e)
+    if ($e.Data -ne $null) { [void]$errBuilder.AppendLine($e.Data) }
+  }
+  $proc.add_ErrorDataReceived($errHandler)
   try {
+    $proc.BeginErrorReadLine()
     $fs = [System.IO.File]::Create($OutPath)
     try {
       $proc.StandardOutput.BaseStream.CopyTo($fs)
     } finally {
       $fs.Dispose()
     }
-    $errText = $proc.StandardError.ReadToEnd()
     $proc.WaitForExit()
     if ($proc.ExitCode -ne 0) {
-      throw "Command failed ($($proc.ExitCode)): $errText"
+      throw "Command failed ($($proc.ExitCode)): $($errBuilder.ToString())"
     }
   } finally {
     $proc.Dispose()
@@ -272,10 +291,20 @@ switch ($Action.ToLowerInvariant()) {
     Assert-Docker
     Write-Host '=== Resuming Overleaf Workspace ==='
     if (-not (Test-ContainerExists $Mongo) -or -not (Test-ContainerExists $Redis) -or -not (Test-ContainerExists $Sharelatex)) {
-      throw "Containers ($Mongo, $Redis, $Sharelatex) do not exist yet. Create them with docker compose up -d first."
+      $composeFile = @(
+        (Join-Path $ToolkitRoot 'docker-compose.yml'),
+        (Join-Path $ParentDir 'docker-compose.yml')
+      ) | Where-Object { Test-Path $_ } | Select-Object -First 1
+      if ($composeFile) {
+        Write-Host "[start] Missing container(s); provisioning via docker compose up -d..."
+        docker compose -f $composeFile up -d
+      } else {
+        throw "Containers ($Mongo, $Redis, $Sharelatex) do not exist yet. Run scripts\install.ps1 or docker compose up -d first."
+      }
+    } else {
+      Write-Host "[start] Starting '$Mongo' and '$Redis'..."
+      $null = docker start $Mongo $Redis
     }
-    Write-Host "[start] Starting '$Mongo' and '$Redis'..."
-    $null = docker start $Mongo $Redis
     Wait-MongoReady
     Wait-RedisReady
     Apply-MemoryLimits

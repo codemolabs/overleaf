@@ -15,4 +15,4 @@ chown www-data:www-data /var/lib/overleaf/tmp/uploads
 chmod 0755 /var/lib/overleaf/tmp/uploads
 
 mkdir -p /var/log/overleaf
-exec /usr/bin/node --max-old-space-size=96 --max-semi-space-size=2 /overleaf/services/package-hub/app.mjs >> /var/log/overleaf/package-hub.log 2>&1
+exec /usr/bin/node /overleaf/services/package-hub/app.mjs >> /var/log/overleaf/package-hub.log 2>&1

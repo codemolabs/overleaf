@@ -42,6 +42,31 @@ export const DownloadProjectZip = () => {
   )
 }
 
+export const DownloadProjectCloudZip = ({
+  onOpenModal,
+}: {
+  onOpenModal: () => void
+}) => {
+  const { t } = useTranslation()
+
+  useCommandProvider(
+    () => [
+      {
+        id: 'download-for-cloud-zip',
+        handler: onOpenModal,
+        label: t('download_for_cloud', 'Download for Cloud (< 30 MB)'),
+      },
+    ],
+    [t, onOpenModal]
+  )
+
+  return (
+    <DropdownMenuItem as="button" type="button" onClick={onOpenModal}>
+      {t('download_for_cloud', 'Download for Cloud (< 30 MB)')}
+    </DropdownMenuItem>
+  )
+}
+
 export const DownloadProjectPDF = () => {
   const { t } = useTranslation()
   const { pdfDownloadUrl, pdfUrl } = useCompileContext()

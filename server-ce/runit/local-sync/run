@@ -43,6 +43,14 @@ select_sync_user() {
 SYNC_USER=$(select_sync_user)
 SYNC_GROUP=$(id -gn "$SYNC_USER")
 
+if [[ ! -d "$DEFAULT_BASE_DIR" ]]; then
+  if [[ "$SYNC_USER" == "root" ]]; then
+    mkdir -p "$DEFAULT_BASE_DIR" 2>/dev/null || true
+  else
+    /sbin/setuser "$SYNC_USER" mkdir -p "$DEFAULT_BASE_DIR" 2>/dev/null || true
+  fi
+fi
+
 if [[ "$ALLOWED_ROOT" == "/var/lib/overleaf/local-projects" && ! -d "$DEFAULT_BASE_DIR" ]]; then
   mkdir -p "$DEFAULT_BASE_DIR" || true
   chown -R "${SYNC_USER}:${SYNC_GROUP}" "$ALLOWED_ROOT" 2>/dev/null || true
@@ -59,7 +67,7 @@ chmod 2770 /tmp/overleaf-local-sync-stage
 
 mkdir -p /var/log/overleaf
 if [[ "$SYNC_USER" == "root" ]]; then
-  exec /usr/bin/node --max-old-space-size=64 --max-semi-space-size=2 /overleaf/services/local-sync/app.mjs >> /var/log/overleaf/local-sync.log 2>&1
+  exec /usr/bin/node /overleaf/services/local-sync/app.mjs >> /var/log/overleaf/local-sync.log 2>&1
 else
-  exec /sbin/setuser "$SYNC_USER" /usr/bin/node --max-old-space-size=64 --max-semi-space-size=2 /overleaf/services/local-sync/app.mjs >> /var/log/overleaf/local-sync.log 2>&1
+  exec /sbin/setuser "$SYNC_USER" /usr/bin/node /overleaf/services/local-sync/app.mjs >> /var/log/overleaf/local-sync.log 2>&1
 fi

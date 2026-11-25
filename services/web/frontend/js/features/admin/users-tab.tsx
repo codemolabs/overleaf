@@ -287,7 +287,7 @@ export default function UsersTab({
     navigator.clipboard
       ?.writeText(generatedLinkModal.url)
       .then(() => setLinkCopied(true))
-      .catch(() => {})
+      .catch(() => { })
   }
 
   const rangeStart = users.length === 0 ? 0 : (page - 1) * PAGE_SIZE + 1
@@ -344,9 +344,8 @@ export default function UsersTab({
                   key={key}
                   type="button"
                   aria-pressed={filter === key}
-                  className={`ol-admin-filter-btn ${
-                    filter === key ? 'is-active' : ''
-                  }`}
+                  className={`ol-admin-filter-btn ${filter === key ? 'is-active' : ''
+                    }`}
                   onClick={() => {
                     setFilter(key)
                     setPage(1)
@@ -541,9 +540,8 @@ export default function UsersTab({
           <span>
             {total === 0
               ? 'Showing 0 users'
-              : `Showing ${rangeStart}-${rangeEnd} of ${total} user${
-                  total === 1 ? '' : 's'
-                }`}
+              : `Showing ${rangeStart}-${rangeEnd} of ${total} user${total === 1 ? '' : 's'
+              }`}
           </span>
           <div className="d-flex align-items-center gap-2">
             <OLButton

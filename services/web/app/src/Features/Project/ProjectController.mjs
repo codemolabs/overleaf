@@ -44,6 +44,7 @@ import InstitutionsFeatures from '../Institutions/InstitutionsFeatures.mjs'
 import InstitutionsGetter from '../Institutions/InstitutionsGetter.mjs'
 import ProjectAuditLogHandler from './ProjectAuditLogHandler.mjs'
 import ProjectAccessPolicyService from '../Authorization/ProjectAccessPolicyService.mjs'
+import LocalProjectSyncManager from './LocalProjectSyncManager.mjs'
 import PublicAccessLevels from '../Authorization/PublicAccessLevels.mjs'
 import TagsHandler from '../Tags/TagsHandler.mjs'
 import TutorialHandler from '../Tutorial/TutorialHandler.mjs'
@@ -758,6 +759,22 @@ const _ProjectController = {
         InactiveProjectManager.promises.reactivateProjectIfRequired(project),
         TpdsProjectFlusher.promises.flushProjectToTpdsIfNeeded(project),
       ])
+
+      if (
+        LocalProjectSyncManager &&
+        typeof LocalProjectSyncManager.syncFromLocalFolderIfChanged === 'function'
+      ) {
+        try {
+          await LocalProjectSyncManager.syncFromLocalFolderIfChanged(projectId, {
+            userId,
+          })
+        } catch (syncErr) {
+          logger.warn(
+            { err: syncErr, projectId },
+            'local-sync: loadEditor sync check failed'
+          )
+        }
+      }
 
       const {
         user,

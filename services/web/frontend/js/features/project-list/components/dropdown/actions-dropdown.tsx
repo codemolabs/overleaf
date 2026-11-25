@@ -7,6 +7,7 @@ import {
 } from '@/shared/components/ol/ol-dropdown-menu'
 import CopyProjectButton from '../table/cells/action-buttons/copy-project-button'
 import DownloadProjectButton from '../table/cells/action-buttons/download-project-button'
+import CloudDownloadProjectButton from '../table/cells/action-buttons/cloud-download-project-button'
 import ArchiveProjectButton from '../table/cells/action-buttons/archive-project-button'
 import TrashProjectButton from '../table/cells/action-buttons/trash-project-button'
 import UnarchiveProjectButton from '../table/cells/action-buttons/unarchive-project-button'
@@ -115,6 +116,23 @@ function ActionsDropdown({ project, compact = false }: ActionDropdownProps) {
                 </li>
               )}
             </DownloadProjectButton>
+            <CloudDownloadProjectButton project={project}>
+              {(text, openCloudModal) => (
+                <li role="none">
+                  <OLDropdownItem
+                    as="button"
+                    tabIndex={-1}
+                    onClick={e => {
+                      e.stopPropagation()
+                      openCloudModal()
+                    }}
+                    leadingIcon="cloud_download"
+                  >
+                    {text}
+                  </OLDropdownItem>
+                </li>
+              )}
+            </CloudDownloadProjectButton>
             <CompileAndDownloadProjectPDFButton project={project}>
               {(text, pendingCompile, downloadProject) => (
                 <li role="none">

@@ -719,9 +719,8 @@ export default function ProjectsAccessTab({
           <span>
             {total === 0
               ? 'Showing 0 projects'
-              : `Showing ${rangeStart}-${rangeEnd} of ${total} project${
-                  total === 1 ? '' : 's'
-                }`}
+              : `Showing ${rangeStart}-${rangeEnd} of ${total} project${total === 1 ? '' : 's'
+              }`}
           </span>
           <div className="d-flex align-items-center gap-2">
             <OLButton
