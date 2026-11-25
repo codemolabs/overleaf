@@ -3,6 +3,7 @@ import { CopyProjectButtonTooltip } from './action-buttons/copy-project-button'
 import { UnarchiveProjectButtonTooltip } from './action-buttons/unarchive-project-button'
 import { UntrashProjectButtonTooltip } from './action-buttons/untrash-project-button'
 import { DownloadProjectButtonTooltip } from './action-buttons/download-project-button'
+import { CloudDownloadProjectButtonTooltip } from './action-buttons/cloud-download-project-button'
 import { LeaveProjectButtonTooltip } from './action-buttons/leave-project-button'
 import { DeleteProjectButtonTooltip } from './action-buttons/delete-project-button'
 import { CompileAndDownloadProjectPDFButtonTooltip } from './action-buttons/compile-and-download-project-pdf-button'
@@ -18,6 +19,7 @@ export default function ActionsCell({ project }: ActionsCellProps) {
     return (
       <>
         <DownloadProjectButtonTooltip project={project} />
+        <CloudDownloadProjectButtonTooltip project={project} />
         <UnarchiveProjectButtonTooltip project={project} />
         <UntrashProjectButtonTooltip project={project} />
         <LeaveProjectButtonTooltip project={project} />
@@ -31,6 +33,7 @@ export default function ActionsCell({ project }: ActionsCellProps) {
       <ShareProjectButtonTooltip project={project} />
       <CopyProjectButtonTooltip project={project} />
       <DownloadProjectButtonTooltip project={project} />
+      <CloudDownloadProjectButtonTooltip project={project} />
       <CompileAndDownloadProjectPDFButtonTooltip project={project} />
       <div className="d-inline-block">
         <ActionsDropdown project={project} compact />

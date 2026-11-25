@@ -33,7 +33,7 @@ Upstream Overleaf batches OT operations inside Redis (`document-updater`) before
 Self-hosted local projects frequently accumulate raw uncompressed figures, build logs, scratch notes, and draft PDFs exceeding cloud limits.
 - `ProjectCloudExportManager.mjs` parses the TeX dependency graph from the root document (`main.tex` fallback) and excludes unused local artifacts automatically with clear per-file reasons in the modal.
 - `cloud_zip_optimize.py` runs progressive resolution + Pillow LANCZOS / OptiPNG / JPEG / QPDF passes targeting `25 MB` (or `30 MB`) while preserving exact TeX-referenced paths.
-- Exposed both in the IDE `#project-title-options` menu (`download-project.tsx`) and `/project` row 3-dot dropdown (`actions-dropdown.tsx`).
+- Exposed in IDE **File -> Download** (`menu-bar.tsx`), `#project-title-options` (`project-title.tsx`), and on `/project` directly in the row Actions download bar (`actions-cell.tsx`), 3-dot dropdown (`actions-dropdown.tsx`), and selection toolbar (`project-tools.tsx`).
 
 ### 3. Streamlined Dashboard & Row Controls
 - Added **Organize Tags** directly inside each single-project 3-dot row menu alongside the bulk action bar.

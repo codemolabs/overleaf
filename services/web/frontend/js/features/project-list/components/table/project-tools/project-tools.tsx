@@ -3,6 +3,7 @@ import { useTranslation } from 'react-i18next'
 import { useProjectListContext } from '../../../context/project-list-context'
 import ArchiveProjectsButton from './buttons/archive-projects-button'
 import DownloadProjectsButton from './buttons/download-projects-button'
+import { CloudDownloadProjectButtonTooltip } from '../cells/action-buttons/cloud-download-project-button'
 import ProjectToolsMoreDropdownButton from './buttons/project-tools-more-dropdown-button'
 import TagsDropdown from './buttons/tags-dropdown'
 import TrashProjectsButton from './buttons/trash-projects-button'
@@ -24,6 +25,14 @@ function ProjectTools() {
         aria-label={t('toolbar_selected_projects_management_actions')}
       >
         <DownloadProjectsButton />
+        {selectedProjects.length === 1 && (
+          <CloudDownloadProjectButtonTooltip
+            project={selectedProjects[0]}
+            variant="secondary"
+            className=""
+            placement="bottom"
+          />
+        )}
         {filter !== 'archived' && <ArchiveProjectsButton />}
         {filter !== 'trashed' && <TrashProjectsButton />}
       </OLButtonGroup>

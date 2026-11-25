@@ -112,6 +112,7 @@ export const ToolbarMenuBar = () => {
             title: t('download'),
             children: [
               'download-as-source-zip',
+              'download-for-cloud-zip',
               'download-pdf',
               'export-as-docx',
               'export-as-markdown',

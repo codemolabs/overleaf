@@ -116,23 +116,6 @@ function ActionsDropdown({ project, compact = false }: ActionDropdownProps) {
                 </li>
               )}
             </DownloadProjectButton>
-            <CloudDownloadProjectButton project={project}>
-              {(text, openCloudModal) => (
-                <li role="none">
-                  <OLDropdownItem
-                    as="button"
-                    tabIndex={-1}
-                    onClick={e => {
-                      e.stopPropagation()
-                      openCloudModal()
-                    }}
-                    leadingIcon="cloud_download"
-                  >
-                    {text}
-                  </OLDropdownItem>
-                </li>
-              )}
-            </CloudDownloadProjectButton>
             <CompileAndDownloadProjectPDFButton project={project}>
               {(text, pendingCompile, downloadProject) => (
                 <li role="none">
@@ -161,6 +144,23 @@ function ActionsDropdown({ project, compact = false }: ActionDropdownProps) {
             </CompileAndDownloadProjectPDFButton>
           </>
         )}
+        <CloudDownloadProjectButton project={project}>
+          {(text, openCloudModal) => (
+            <li role="none">
+              <OLDropdownItem
+                as="button"
+                tabIndex={-1}
+                onClick={e => {
+                  e.stopPropagation()
+                  openCloudModal()
+                }}
+                leadingIcon="cloud_download"
+              >
+                {text}
+              </OLDropdownItem>
+            </li>
+          )}
+        </CloudDownloadProjectButton>
         <CustomizeFolderButton project={project}>
           {(text, handleOpenModal) => (
             <li role="none">

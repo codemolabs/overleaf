@@ -3572,11 +3572,13 @@ import ProjectSharingBadge from '../sharing/project-sharing-badge'`,
   copyStagedFile('frontend/js/features/package-hub/components/package-details-modal.tsx')
   copyStagedFile('frontend/js/i18n-resources/package-hub.ts')
 
-  // 18. Cloud ZIP (< 30 MB) frontend UI in IDE dropdown and /project row menu
+  // 18. Cloud ZIP (< 30 MB) frontend UI in IDE File->Download / title dropdown and /project row, toolbar & 3-dot menu
   copyStagedFile('frontend/js/shared/components/cloud-export-modal.tsx')
   copyStagedFile('frontend/js/features/ide-react/components/toolbar/download-project.tsx')
   copyStagedFile('frontend/js/features/ide-react/components/toolbar/project-title.tsx')
   copyStagedFile('frontend/js/features/project-list/components/table/cells/action-buttons/cloud-download-project-button.tsx')
+  copyStagedFile('frontend/js/features/project-list/components/table/project-tools/project-tools.tsx')
+  copyStagedFile('frontend/js/features/project-list/components/table/project-tools/buttons/project-tools-more-dropdown-button.tsx')
 
   // 19. COSL Edition SVG brand logos & responsive header/logo sizing (logo only on top bar)
   copyStagedFile('frontend/stylesheets/cosl-brand-navbar.scss')

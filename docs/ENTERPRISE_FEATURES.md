@@ -44,8 +44,8 @@ See **[docs/LOCAL_FOLDER_SYNC.md](LOCAL_FOLDER_SYNC.md)** for protocol and path 
 
 Local research workspaces often contain 40+ MB of uncompressed matplotlib/Illustrator diagrams, backup draft PDFs, scratch scripts, and unreferenced files that exceed Overleaf.com upload caps.
 
-- **IDE Toolbar**: Click the project title dropdown (`#project-title-options`) -> **Download for Cloud (< 30 MB)**.
-- **Dashboard Row Menu**: Click the 3-dot actions button (`...`) on any project -> **Download for Cloud (< 30 MB)**.
+- **IDE Menus**: Open **File -> Download -> Download for Cloud (< 30 MB)** OR click the project title dropdown (`#project-title-options`) -> **Download for Cloud (< 30 MB)**.
+- **Dashboard Row & Selection Bar**: Click the **Cloud ZIP** (`cloud_download`) icon directly next to Download on any project row, open the **3-dot actions menu (`...`)**, or check a project and use the top toolbar **Download for Cloud (< 30 MB)** / **More** button.
 - **Three-Stage Pipeline (`ProjectCloudExportManager.mjs` + `cloud_zip_optimize.py`)**:
   1. Parses the root document (`main.tex`) recursively across `\input`, `\include`, `\bibliography`, `\includegraphics`, `\documentclass`, and `\usepackage` references so only required project artifacts are kept; draft PDFs (`.pdf` outputs not referenced as figures), scripts, build artifacts, and unused `.tex` files are listed under **Excluded local files**.
   2. Runs multi-tier media optimization (Pillow LANCZOS downscaling from `2200px` down to `760px` with lossless/palette `optipng` + progressive JPEG re-encoding + lossless `qpdf` stream compaction) targeting **25 MB (Recommended)** or **30 MB (Overleaf limit)**.
